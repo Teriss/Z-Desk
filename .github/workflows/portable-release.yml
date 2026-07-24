@@ -12,6 +12,8 @@ jobs:
   publish:
     runs-on: windows-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -26,9 +28,10 @@ jobs:
         shell: pwsh
         run: .\scripts\publish-portable.ps1 -Output "artifacts\portable\ZDesk-${{ inputs.version }}-win-x64"
 
-      - name: Upload portable EXE
-        uses: actions/upload-artifact@v4
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ZDesk-${{ inputs.version }}-win-x64-portable
-          path: artifacts/portable/ZDesk-${{ inputs.version }}-win-x64/ZDesk.exe
-          if-no-files-found: error
+          tag_name: v${{ inputs.version }}
+          name: Z-Desk ${{ inputs.version }}
+          generate_release_notes: true
+          files: artifacts/portable/ZDesk-${{ inputs.version }}-win-x64/ZDesk.exe
