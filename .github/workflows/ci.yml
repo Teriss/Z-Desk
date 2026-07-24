@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build
+        run: dotnet build ZDesk.csproj -c Debug
+
+      - name: Release build
+        run: dotnet build ZDesk.csproj -c Release
+
+      - name: Build smoke tests
+        run: dotnet build tests\ZDesk.SmokeTests\ZDesk.SmokeTests.csproj -c Debug -p:SelfContained=true -p:UseAppHost=true -o artifacts\ci-smoke
+
+      - name: Run smoke tests
+        run: .\artifacts\ci-smoke\ZDesk.SmokeTests.exe
+
+      - name: Validate portable publish
+        shell: pwsh
+        run: .\scripts\publish-portable.ps1 -Output artifacts\portable\ci-portable

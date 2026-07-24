@@ -1,0 +1,115 @@
+一、 核心架构：成熟产品是怎么做的？
+成熟的桌面分组软件（如近代的 Fences）绝对不会把用户的文件移动到真实的隐藏文件夹中，这会破坏用户的文件路径和习惯（比如一些快捷方式或批处理会失效）。同时，虚拟 Shell Namespace Extension (NSE) 也属于杀鸡用牛刀，不仅开发极其痛苦（C++ COM 地狱），而且容易引发 Explorer 崩溃。
+
+当前主流且最稳妥的架构是：影子桌面 (Shadow Desktop) + 混合渲染 (Hybrid UI)
+
+1. 隐藏原生桌面，接管视觉
+利用 EnumWindows 和 FindWindow 找到系统的桌面图标层（通常是 Progman 或 WorkerW 下的 SHELLDLL_DefView）。
+
+通过 ShowWindow(hwnd, SW_HIDE) 隐藏原生桌面图标层，但保持其在后台存活。
+
+发送 0x052C 消息给 Progman 生成新的 WorkerW（壁纸上层），并将你的 WPF 窗口 SetParent 挂载到这个 WorkerW 上，作为全屏透明容器。
+
+2. 分组容器的实现（两种分支）
+这里有两条路，取决于你对“原生感”的极致追求程度：
+
+路线 A：继续使用 WPF 自绘（推荐，好控制）
+
+你继续用 WPF 绘制 Box 和图标。
+
+关键改变： 放弃绝对路径字符串，所有底层数据结构改用 PIDL (Pointer to an Item Identifier List) 和 IShellItem。
+
+所有右键、拖拽、图标获取，全部通过 COM 接口将 PIDL 传递给 Windows Shell API 处理。
+
+路线 B：在 WPF 中宿主原生 IShellView (ExplorerBrowser)
+
+在你的分组 Box 中，通过 HwndHost 嵌入 IExplorerBrowser。
+
+将路径指向 CSIDL_DESKTOP。
+
+核心技术： 实现 IFolderFilter 接口。告诉这个原生的控件：“在这个框里，你只显示 A、B、C 这三个文件，其他文件你统统隐藏”。
+
+优点： 右键、拖拽、预览窗格 100% 原生，完美支持所有第三方 Shell 扩展。
+
+缺点： 多个 IExplorerBrowser 实例占用内存较大，且 UI 样式（如滚动条、背景色）极难深度定制。
+
+二、 核心痛点攻坚：第三方集成与同步
+如果你选择 路线 A（WPF 自绘 + COM 桥接），你需要解决以下几个痛点：
+
+1. QuickLook / 空格预览的集成方案（无需注入）
+QuickLook 的原理是：当按下空格时，它通过 Windows API 查找当前激活的窗口，如果发现是桌面 (WorkerW 或 Progman)，它会通过 COM 接口 IShellWindows -> IShellFolderViewDual 获取当前选中的文件路径。
+因为你覆盖了桌面，QuickLook 拿不到你 WPF 里的选中项。
+
+完美解决方案有两套：
+
+方案一：主动调用（最简单可靠）
+拦截 WPF 容器内的空格键 (KeyDown 事件)。当用户在选中文件上按空格时，直接通过命令行启动 QuickLook（如果是商店版则调用协议）：
+Process.Start("QuickLook.exe", $"\"{selectedFilePath}\"");
+QuickLook 原生支持这种被调用的方式，完全不需要折腾 COM 注入。
+
+方案二：状态同步到隐藏的原生桌面（最优雅，支持所有第三方工具）
+前文提到，原生的 SHELLDLL_DefView 只是被你隐藏了，并没有销毁。
+当用户在你的 WPF 软件中点击选中某个文件时，你通过代码，将原生隐藏桌面中的对应文件也设置为选中状态（通过获取桌面的 IFolderView 接口，调用 SelectItem）。
+这样，不仅 QuickLook 能正常抓取到选中项，其他任何依赖当前激活文件的第三方 Shell 扩展都能完美运作。
+
+2. 文件实时同步 (拒绝轮询与 ReadDirectoryChangesW)
+不要用 FileSystemWatcher 或 ReadDirectoryChangesW，它们抓不到“快捷方式图标改变”或者“文件属性变化”。
+关键接口：SHChangeNotifyRegister
+
+向系统 Shell 注册一个全局的监听器。
+
+无论是桌面新建了文件、删除了文件，还是某个文件的图标被其他软件修改了，Explorer 都会收到通知，你的软件也能同步收到 SHCNE_CREATE, SHCNE_DELETE, SHCNE_UPDATEITEM 等消息，做到和资源管理器毫秒级同步刷新。
+
+3. 完美的原生拖放 (OLE Drag & Drop)
+WPF 自带的 DragDrop 是不够的，你需要实现原生的 OLE 拖放，以支持将文件拖拽到第三方软件或从浏览器拖入桌面：
+
+拖出： 实现 IDropSource，并将要拖动的文件打包成 CF_HDROP 格式的 IDataObject，调用 DoDragDrop。
+
+拖入： 你的窗口需要注册为 IDropTarget，系统会将文件路径以 CF_HDROP 的形式交给你。
+
+三、 关键 COM 接口清单 (C#/WPF 开发必备)
+要完成上述架构，你需要在 C# 中使用 P/Invoke 定义以下关键 COM 接口（推荐使用 CsWin32 或直接查阅 PInvoke.net）：
+
+数据核心：
+
+IShellItem / IShellItemArray：代替普通的 string path。
+
+SHParseDisplayName：将路径转为 PIDL。
+
+视觉与图标：
+
+IShellItemImageFactory::GetImage：获取包含 UAC 盾牌、快捷方式箭头、网盘同步角标的超清图标。
+
+右键菜单：
+
+IContextMenu (1, 2, 3)：构建原生右键菜单。
+
+TrackPopupMenuEx：在屏幕上弹出这个菜单。
+
+影子状态同步：
+
+IFolderView：用来操作那个被隐藏的原生桌面（获取它的项、设置它的选中状态）。
+
+四、 推荐的开源参考项目
+不要从零开始硬啃 COM 接口，以下开源项目是极佳的参考资料：
+
+Files (Files Community)
+
+目前最成熟的 Windows 第三方文件管理器（WinUI/C#）。
+
+参考价值： 它几乎把所有 Windows Shell COM 接口都用 C# 完美封装了一遍。你可以直接去抄它关于 IContextMenu、IShellItemImageFactory 和 SHChangeNotifyRegister 的实现。
+
+ExplorerBrowser for .NET (Windows API Code Pack)
+
+如果你想尝试“路线 B”（直接宿主原生组件），这个库封装了 ExplorerBrowser 控件，可以直接嵌入 WPF。
+
+总结建议的推进路线
+第一步： 引入 SHChangeNotifyRegister，把现有的静态文件展示改成实时同步。
+
+第二步： 废弃 string 路径，改用 PIDL 和 IShellItem 作为底层数据模型，并使用 IShellItemImageFactory 渲染完美的图标。
+
+第三步： 跑通“状态同步机制”，当你点击 WPF 图标时，使用 IFolderView 默默选中隐藏原生桌面的对应图标，以此搞定 QuickLook。
+
+第四步： 啃下 IContextMenu 这块硬骨头，替换掉现有的部分右键功能，实现 100% 原生菜单。
+
+由于这种软件崩掉只会导致 WorkerW 上的窗口消失，不会影响 Explorer.exe 本身，所以你的容错率很高，放手去使用 P/Invoke 即可。

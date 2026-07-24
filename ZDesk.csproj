@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <ApplicationIcon>Assets\ZDesk.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <AssemblyName>ZDesk</AssemblyName>
+    <RootNamespace>ZDesk</RootNamespace>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <Resource Include="Assets\ZDesk.ico" />
+  </ItemGroup>
+
+  <Target Name="BuildExplorerCommand" BeforeTargets="BeforeBuild" Condition="'$(Configuration)' == 'Release' and '$(PortableSingleExe)' != 'true'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\build-explorer-command.ps1&quot; -Configuration &quot;$(Configuration)&quot; -ProjectRoot &quot;$(MSBuildProjectDirectory)&quot;" />
+  </Target>
+
+  <Target Name="CopyExplorerCommandToPublish" AfterTargets="Publish" Condition="'$(PortableSingleExe)' != 'true'">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\bin\$(Configuration)\net10.0-windows\win-x64\ZDeskExplorerCommand.dll"
+          DestinationFolder="$(PublishDir)" />
+  </Target>
+</Project>
