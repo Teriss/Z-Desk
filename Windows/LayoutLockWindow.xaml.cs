@@ -64,7 +64,8 @@ public partial class LayoutLockWindow : Window
         var factory = new FrameworkElementFactory(typeof(CheckBox));
         factory.SetBinding(ContentControl.ContentProperty, new System.Windows.Data.Binding(nameof(LayoutLockOption.Title)));
         factory.SetBinding(ToggleButton.IsCheckedProperty, new System.Windows.Data.Binding(nameof(LayoutLockOption.IsLocked)) { Mode = System.Windows.Data.BindingMode.TwoWay });
-        factory.SetValue(FrameworkElement.MarginProperty, new Thickness(4, 6, 4, 6));
+        factory.SetValue(Control.ForegroundProperty, FindResource("SettingsTextBrush"));
+        factory.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
         factory.AddHandler(ToggleButton.CheckedEvent, new RoutedEventHandler(OptionChanged));
         factory.AddHandler(ToggleButton.UncheckedEvent, new RoutedEventHandler(OptionChanged));
         template.VisualTree = factory;

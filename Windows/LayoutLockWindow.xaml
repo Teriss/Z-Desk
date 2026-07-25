@@ -5,6 +5,55 @@
         WindowStartupLocation="CenterOwner" WindowStyle="None" ResizeMode="CanResizeWithGrip"
         Background="{StaticResource SettingsSurfaceBrush}" Foreground="{StaticResource SettingsTextBrush}"
         FontFamily="Segoe UI Variable Text, Segoe UI">
+    <Window.Resources>
+        <!-- The dialog is opened from SettingsWindow, but does not inherit its local control styles. -->
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{StaticResource SettingsTextBrush}" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Padding" Value="8,8" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <Grid Background="Transparent">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="24" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <Border x:Name="Box" Width="17" Height="17" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                    Background="#FF171820" BorderBrush="#FF7D8492" BorderThickness="1" CornerRadius="3">
+                                <Path x:Name="Check" Visibility="Collapsed" Stroke="White" StrokeThickness="2"
+                                      Data="M2,8 L6,12 L14,3" Stretch="Uniform" Margin="2" />
+                            </Border>
+                            <ContentPresenter Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}" RecognizesAccessKey="True" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True"><Setter TargetName="Box" Property="Background" Value="#FF4A82D8" /><Setter TargetName="Box" Property="BorderBrush" Value="#FF8EB6F3" /><Setter TargetName="Check" Property="Visibility" Value="Visible" /></Trigger>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Box" Property="BorderBrush" Value="#FFB8C8E5" /></Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45" /></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Foreground" Value="{StaticResource SettingsTextBrush}" />
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="ItemSurface" Background="{TemplateBinding Background}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ItemSurface" Property="Background" Value="#FF2B2E38" /></Trigger>
+                            <Trigger Property="IsSelected" Value="True"><Setter TargetName="ItemSurface" Property="Background" Value="#FF26364D" /></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="0" ResizeBorderThickness="6" CornerRadius="0" GlassFrameThickness="0" UseAeroCaptionButtons="False" />
     </WindowChrome.WindowChrome>
@@ -26,7 +75,8 @@
             </StackPanel>
         </StackPanel>
         <ListBox x:Name="LayoutOptionsList" Grid.Row="2" Margin="22,0" Background="{StaticResource SettingsSurfaceBrush}"
-                 BorderBrush="{StaticResource SettingsLineBrush}" BorderThickness="1" Padding="8" />
+                 BorderBrush="{StaticResource SettingsLineBrush}" BorderThickness="1" Padding="8"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto" />
         <Border Grid.Row="3" Margin="0,14,0,0" Background="{StaticResource SettingsTitleBarBrush}" BorderBrush="{StaticResource SettingsLineBrush}" BorderThickness="0,1,0,0">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="22,0">
                 <Button Style="{StaticResource SettingsDialogButtonStyle}" Content="取消" IsCancel="True" Click="CancelButton_Click" />
