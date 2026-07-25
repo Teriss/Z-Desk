@@ -211,6 +211,7 @@ public sealed class GroupDefinition
     public LayoutViewMode ViewMode { get; set; } = LayoutViewMode.MediumIcons;
     public LayoutSortProperty SortProperty { get; set; } = LayoutSortProperty.Manual;
     public bool SortDescending { get; set; }
+    public bool IsRuleLocked { get; set; }
     public double? DesktopX { get; set; }
     public double? DesktopY { get; set; }
     public string? DisplayDeviceName { get; set; }
@@ -311,7 +312,8 @@ public sealed class GroupDefinition
         ItemOrder = [.. tab.ItemOrder],
         ViewMode = tab.ViewMode,
         SortProperty = tab.SortProperty,
-        SortDescending = tab.SortDescending
+        SortDescending = tab.SortDescending,
+        IsRuleLocked = tab.IsRuleLocked
     };
 
     private LayoutTab CaptureCurrentTab(Guid layoutId) => new()
@@ -324,7 +326,8 @@ public sealed class GroupDefinition
         ItemOrder = [.. ItemOrder],
         ViewMode = ViewMode,
         SortProperty = SortProperty,
-        SortDescending = SortDescending
+        SortDescending = SortDescending,
+        IsRuleLocked = IsRuleLocked
     };
 
     private void ApplyCurrentToTab(LayoutTab tab)
@@ -337,6 +340,7 @@ public sealed class GroupDefinition
         tab.ViewMode = ViewMode;
         tab.SortProperty = SortProperty;
         tab.SortDescending = SortDescending;
+        tab.IsRuleLocked = IsRuleLocked;
     }
 
     private void ApplyTabToCurrent(LayoutTab tab)
@@ -349,6 +353,7 @@ public sealed class GroupDefinition
         ViewMode = tab.ViewMode;
         SortProperty = tab.SortProperty;
         SortDescending = tab.SortDescending;
+        IsRuleLocked = tab.IsRuleLocked;
     }
 }
 
@@ -364,6 +369,7 @@ public sealed class LayoutTab
     public LayoutSortProperty SortProperty { get; set; } = LayoutSortProperty.Manual;
     public bool SortDescending { get; set; }
     public bool IsRuleManaged { get; set; }
+    public bool IsRuleLocked { get; set; }
 
     public LayoutTab Clone() => new()
     {
@@ -376,7 +382,8 @@ public sealed class LayoutTab
         ViewMode = ViewMode,
         SortProperty = SortProperty,
         SortDescending = SortDescending,
-        IsRuleManaged = IsRuleManaged
+        IsRuleManaged = IsRuleManaged,
+        IsRuleLocked = IsRuleLocked
     };
 }
 

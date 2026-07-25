@@ -56,6 +56,11 @@ public partial class SettingsWindow : Window
         public string Description => LayoutKind == GroupKind.Folder
             ? Tab?.FolderPath ?? Host.FolderPath ?? "未映射"
             : $"{(Tab?.PinnedPaths.Count ?? Host.PinnedPaths.Count)} 个引用";
+        public bool IsRuleLocked
+        {
+            get => Tab?.IsRuleLocked ?? Host.IsRuleLocked;
+            set { if (Tab is null) Host.IsRuleLocked = value; else Tab.IsRuleLocked = value; }
+        }
         public LayoutRow(GroupDefinition host, LayoutTab? tab = null) { Host = host; Tab = tab; }
     }
 

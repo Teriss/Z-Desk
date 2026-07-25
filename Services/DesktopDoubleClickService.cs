@@ -31,6 +31,7 @@ public sealed class DesktopDoubleClickService : IDisposable
     private Point _lastBlankClickPoint;
 
     public event EventHandler? DesktopBlankDoubleClicked;
+    public event Action<System.Drawing.Point>? LeftButtonClicked;
 
     public DesktopDoubleClickService(Dispatcher dispatcher)
     {
@@ -66,7 +67,11 @@ public sealed class DesktopDoubleClickService : IDisposable
         if (code >= 0 && message.ToInt32() == WmLeftButtonDown)
         {
             var mouse = Marshal.PtrToStructure<MouseHookData>(data);
-            _dispatcher.BeginInvoke(() => ProcessClick(mouse.Position, mouse.Time), DispatcherPriority.Input);
+            _dispatcher.BeginInvoke(() =>
+            {
+                LeftButtonClicked?.Invoke(new System.Drawing.Point(mouse.Position.X, mouse.Position.Y));
+                ProcessClick(mouse.Position, mouse.Time);
+            }, DispatcherPriority.Input);
         }
 
         return CallNextHookEx(_hook, code, message, data);

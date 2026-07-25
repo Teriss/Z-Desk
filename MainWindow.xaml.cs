@@ -37,6 +37,7 @@ public partial class MainWindow : Window
     private readonly HashSet<Guid> _activeHotKeyBindings = [];
     private readonly Dictionary<int, Guid> _hotKeyBindingKeys = [];
     private bool _temporarilyRevealed;
+    private bool _topmostFromHotKey;
     private bool _shutdownInProgress;
     private bool _shutdownReady;
     private bool _applicationExitRequested;
@@ -74,6 +75,14 @@ public partial class MainWindow : Window
             if (_desktopMode && _state.Settings.DoubleClickHidesGroups)
             {
                 ToggleGroupsVisibility();
+            }
+        };
+        _desktopDoubleClickService.LeftButtonClicked += point =>
+        {
+            if (_topmostFromHotKey && _isTopmost && !_desktopWindows.Any(window => window.IsVisible && window.IsPointWithinWindow(point)))
+            {
+                _activeHotKeyBindings.Clear();
+                EndTopmostMode();
             }
         };
 
@@ -424,11 +433,18 @@ public partial class MainWindow : Window
                 // The settings page only edits these fields. Keeping the live model prevents
                 // a stale settings snapshot from resetting position, size, ordering or selection.
                 live.Title = desired.Title;
+                live.IsRuleLocked = desired.IsRuleLocked;
                 foreach (var desiredTab in desired.Tabs)
                 {
                     var liveTab = live.Tabs.FirstOrDefault(tab => tab.Id == desiredTab.Id);
-                    if (liveTab is not null) liveTab.Title = desiredTab.Title;
+                    if (liveTab is not null)
+                    {
+                        liveTab.Title = desiredTab.Title;
+                        liveTab.IsRuleLocked = desiredTab.IsRuleLocked;
+                    }
                 }
+                if (live.Tabs.ElementAtOrDefault(live.ActiveTabIndex) is { } currentTab)
+                    live.IsRuleLocked = currentTab.IsRuleLocked;
                 if (live.Tabs.ElementAtOrDefault(live.ActiveTabIndex) is { } activeTab)
                     live.Title = activeTab.Title;
                 _desktopWindows.FirstOrDefault(window => window.Group.Definition.Id == live.Id)
@@ -799,6 +815,7 @@ public partial class MainWindow : Window
         var binding = _state.Settings.TopmostHotKeys.FirstOrDefault(item => item.Id == bindingId);
         if (binding is null || !binding.Enabled) return;
         if (!_activeHotKeyBindings.Add(bindingId)) _activeHotKeyBindings.Remove(bindingId);
+        _topmostFromHotKey = _activeHotKeyBindings.Count > 0;
         ApplyActiveTopmostState();
     }
 
@@ -819,10 +836,12 @@ public partial class MainWindow : Window
         }
 
         var targets = new HashSet<Guid>();
+        var hasAllLayoutsBinding = false;
         foreach (var binding in _state.Settings.TopmostHotKeys.Where(binding => _activeHotKeyBindings.Contains(binding.Id)))
         {
             if (binding.AllLayouts)
             {
+                hasAllLayoutsBinding = true;
                 foreach (var layout in EnumerateLayoutIds()) targets.Add(layout);
             }
             else
@@ -841,7 +860,7 @@ public partial class MainWindow : Window
             var isTargeted = window.Group.Definition.Tabs.Count == 0
                 ? targets.Contains(window.Group.Definition.Id)
                 : matchingTabs.Length > 0;
-            if (isTargeted && matchingTabs.Length > 0 && window.Group.Definition.ActiveTabIndex != matchingTabs[0].index)
+            if (!hasAllLayoutsBinding && isTargeted && matchingTabs.Length > 0 && window.Group.Definition.ActiveTabIndex != matchingTabs[0].index)
             {
                 window.Group.Definition.ActivateTab(matchingTabs[0].index);
                 window.Group.RefreshDefinitionChrome();
@@ -878,6 +897,7 @@ public partial class MainWindow : Window
     {
         if (_isTopmost) return;
         _isTopmost = true;
+        _topmostFromHotKey = false;
         _temporarilyRevealed = _groupsHidden;
         var windows = _desktopWindows.ToArray();
         foreach (var window in windows)
@@ -903,7 +923,9 @@ public partial class MainWindow : Window
     private void EndTopmostMode()
     {
         if (!_isTopmost) return;
+        _activeHotKeyBindings.Clear();
         _isTopmost = false;
+        _topmostFromHotKey = false;
         var hideAfterRelease = _temporarilyRevealed && _groupsHidden;
         _temporarilyRevealed = false;
         foreach (var window in _desktopWindows.ToArray())
@@ -1073,20 +1095,31 @@ public partial class MainWindow : Window
         {
             if (group.Tabs.Count == 0)
             {
-                released += group.PinnedPaths.RemoveAll(_desktopFiles.IsDesktopPath);
-                group.ItemOrder.RemoveAll(_desktopFiles.IsDesktopPath);
+                    if (!group.IsRuleLocked)
+                    {
+                        released += group.PinnedPaths.RemoveAll(_desktopFiles.IsDesktopPath);
+                        group.ItemOrder.RemoveAll(_desktopFiles.IsDesktopPath);
+                    }
                 continue;
             }
             group.StoreActiveTab();
             foreach (var tab in group.Tabs.Where(tab => tab.Kind == GroupKind.Empty))
             {
-                released += tab.PinnedPaths.RemoveAll(_desktopFiles.IsDesktopPath);
-                tab.ItemOrder.RemoveAll(_desktopFiles.IsDesktopPath);
+                if (!tab.IsRuleLocked)
+                {
+                    released += tab.PinnedPaths.RemoveAll(_desktopFiles.IsDesktopPath);
+                    tab.ItemOrder.RemoveAll(_desktopFiles.IsDesktopPath);
+                }
             }
             group.ReloadActiveTab();
         }
 
-        var assignments = new LayoutAssignmentService().Preview(desktopItems, normalGroups, _state.LayoutMatchRules);
+        var lockedPaths = normalGroups.SelectMany(group => group.Tabs.Count == 0
+            ? (group.IsRuleLocked ? group.PinnedPaths : [])
+            : group.Tabs.Where(tab => tab.IsRuleLocked).SelectMany(tab => tab.PinnedPaths))
+            .Where(_desktopFiles.IsDesktopPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var assignments = new LayoutAssignmentService().Preview(desktopItems.Where(path => !lockedPaths.Contains(path)), normalGroups, _state.LayoutMatchRules);
         foreach (var (path, groupId, tabId) in assignments)
         {
             var group = normalGroups.First(group => group.Id == groupId);

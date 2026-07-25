@@ -57,6 +57,7 @@ public sealed class SnapshotService
         ViewMode = group.ViewMode,
         SortProperty = group.SortProperty,
         SortDescending = group.SortDescending,
+        IsRuleLocked = group.IsRuleLocked,
         DesktopX = group.DesktopX,
         DesktopY = group.DesktopY,
         DisplayDeviceName = group.DisplayDeviceName,

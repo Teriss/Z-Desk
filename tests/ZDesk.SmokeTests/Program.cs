@@ -21,6 +21,7 @@ try
     TestEdgeDockGeometry();
     await TestRulesAsync(normalizedTestRoot);
     await TestLayoutPathMatchingAsync(normalizedTestRoot);
+    TestLockedLayoutAssignment(normalizedTestRoot);
     await TestHotKeyAndDockPersistenceAsync(normalizedTestRoot);
     await TestLayoutBackupAsync(normalizedTestRoot);
     await TestFirstRunPresetsAsync(normalizedTestRoot);
@@ -300,6 +301,32 @@ static async Task TestLayoutPathMatchingAsync(string root)
         PathContains = "steam"
     };
     Assert(new LayoutAssignmentService().Preview([url], [host], [mismatch]).Count == 0, "layout rule extension mismatch");
+}
+
+static void TestLockedLayoutAssignment(string root)
+{
+    var lockedPath = Path.Combine(root, "locked.txt");
+    File.WriteAllText(lockedPath, "locked");
+    var lockedTab = new LayoutTab { Title = "locked", IsRuleLocked = true, PinnedPaths = [lockedPath] };
+    var lockedGroup = new GroupDefinition { Tabs = [lockedTab] };
+    var rule = new LayoutMatchRule { GroupId = lockedTab.Id.ToString(), Extensions = ".txt", Priority = 1 };
+    var result = new LayoutAssignmentService().Preview([lockedPath], [lockedGroup], [rule]);
+    Assert(result.Count == 0, "locked layout is not a rule target");
+    var unlockedGroup = new GroupDefinition { Title = "unlocked" };
+    var unlockedRule = new LayoutMatchRule { GroupId = unlockedGroup.Id.ToString(), Extensions = ".txt" };
+    Assert(new LayoutAssignmentService().Preview([lockedPath], [unlockedGroup], [unlockedRule]).Count == 1,
+        "unlocked layout remains a rule target");
+    var lockedOrdinary = new GroupDefinition { IsRuleLocked = true };
+    var ordinaryRule = new LayoutMatchRule { GroupId = lockedOrdinary.Id.ToString(), Extensions = ".txt" };
+    Assert(new LayoutAssignmentService().Preview([lockedPath], [lockedOrdinary], [ordinaryRule]).Count == 0,
+        "locked ordinary layout is not a rule target");
+
+    var clone = lockedTab.Clone();
+    Assert(clone.IsRuleLocked, "locked tab state cloned");
+    var groupClone = GroupDefinition.FromTab(lockedTab);
+    Assert(groupClone.IsRuleLocked, "locked tab state preserved when detached");
+    var snapshotClone = SnapshotService.CloneGroups([lockedGroup]).Single();
+    Assert(snapshotClone.Tabs.Single().IsRuleLocked, "locked tab state preserved in snapshots");
 }
 
 static async Task TestHotKeyAndDockPersistenceAsync(string root)

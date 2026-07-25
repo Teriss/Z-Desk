@@ -392,7 +392,7 @@
                 <TabItem Header="自动归类">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <Grid Margin="0,0,0,16">
-                        <Grid.RowDefinitions><RowDefinition Height="0" /><RowDefinition Height="0" /><RowDefinition Height="Auto" /><RowDefinition Height="520" /></Grid.RowDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="0" /><RowDefinition Height="150" /><RowDefinition Height="Auto" /><RowDefinition Height="520" /></Grid.RowDefinitions>
                         <StackPanel Visibility="Collapsed">
                             <TextBlock Text="布局" FontSize="24" FontWeight="SemiBold" />
                             <TextBlock Text="普通布局可配置自动归类规则；映射布局展示真实文件夹。" Margin="0,4,0,14" Foreground="{StaticResource MutedBrush}" />
@@ -402,8 +402,8 @@
                                 <Button Content="删除所选" Click="DeleteLayout_Click" />
                             </WrapPanel>
                         </StackPanel>
-                        <DataGrid x:Name="LayoutsGrid" Grid.Row="1" Visibility="Collapsed" AutoGenerateColumns="False" CanUserAddRows="False" CanUserSortColumns="False" CanUserReorderColumns="False">
-                            <DataGrid.Columns><DataGridTextColumn Header="名称" Binding="{Binding Title}" Width="150" /><DataGridTextColumn Header="类型" Binding="{Binding Kind}" Width="80" IsReadOnly="True" /><DataGridTextColumn Header="映射 / 内容" Binding="{Binding Description}" Width="*" IsReadOnly="True" /></DataGrid.Columns>
+                        <DataGrid x:Name="LayoutsGrid" Grid.Row="1" Visibility="Visible" AutoGenerateColumns="False" CanUserAddRows="False" CanUserSortColumns="False" CanUserReorderColumns="False">
+                            <DataGrid.Columns><DataGridTextColumn Header="名称" Binding="{Binding Title}" Width="150" /><DataGridTextColumn Header="类型" Binding="{Binding Kind}" Width="80" IsReadOnly="True" /><DataGridCheckBoxColumn Header="锁定规则" Binding="{Binding IsRuleLocked, Mode=TwoWay}" Width="90" /><DataGridTextColumn Header="映射 / 内容" Binding="{Binding Description}" Width="*" IsReadOnly="True" /></DataGrid.Columns>
                         </DataGrid>
                         <StackPanel Grid.Row="2" Margin="0,0,0,10">
                             <DockPanel LastChildFill="False"><TextBlock Text="自动归类规则" FontSize="17" FontWeight="SemiBold" /><Button DockPanel.Dock="Right" Content="立即重新归类桌面" Background="#FF3566B6" BorderBrush="#FF6F9CDD" Margin="12,0,0,0" Click="ReapplyLayoutRules_Click" /></DockPanel>

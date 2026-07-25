@@ -40,6 +40,12 @@ public sealed class DesktopGroupWindow : Window
 
     public bool IsEdgeHidden => _edgeHidden;
     public bool IsTemporaryTopmost => _temporaryTopmost;
+    public bool IsPointWithinWindow(System.Drawing.Point point)
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        return handle != nint.Zero && GetWindowRect(handle, out var bounds) &&
+            point.X >= bounds.Left && point.X < bounds.Right && point.Y >= bounds.Top && point.Y < bounds.Bottom;
+    }
     public DockEdge DockEdge => Group.Definition.DockEdge;
     public bool IsInteractionBusy => Group.IsInteractionBusy;
 

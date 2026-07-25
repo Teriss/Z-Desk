@@ -17,10 +17,10 @@ public sealed class LayoutAssignmentService
         {
             if (group.Tabs.Count == 0)
             {
-                if (group.Kind == GroupKind.Empty) groupList[group.Id.ToString()] = (group.Id, null);
+                if (group.Kind == GroupKind.Empty && !group.IsRuleLocked) groupList[group.Id.ToString()] = (group.Id, null);
                 continue;
             }
-            foreach (var tab in group.Tabs.Where(tab => tab.Kind == GroupKind.Empty))
+            foreach (var tab in group.Tabs.Where(tab => tab.Kind == GroupKind.Empty && !tab.IsRuleLocked))
                 groupList[tab.Id.ToString()] = (group.Id, tab.Id);
         }
         var ordered = rules.Where(r => r.Enabled).OrderBy(r => r.Priority).ToArray();
