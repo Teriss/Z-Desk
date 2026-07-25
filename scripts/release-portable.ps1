@@ -22,12 +22,12 @@ function Update-Version([string] $version) {
     $propsPath = Join-Path $root 'Directory.Build.props'
     $props = Get-Content $propsPath -Raw
     $props = [regex]::Replace($props, '<ZDeskVersion([^>]*)>[^<]+</ZDeskVersion>', ('<ZDeskVersion$1>' + $version + '</ZDeskVersion>'))
-    Set-Content -LiteralPath $propsPath -Value $props -Encoding utf8NoBOM
+    Set-Content -LiteralPath $propsPath -Value $props -Encoding UTF8
 
     $manifestPath = Join-Path $root 'packaging\ModernContextMenu\AppxManifest.xml'
     $manifest = Get-Content $manifestPath -Raw
     $manifest = [regex]::Replace($manifest, 'Version="[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"', ('Version="' + $version + '.0"'))
-    Set-Content -LiteralPath $manifestPath -Value $manifest -Encoding utf8NoBOM
+    Set-Content -LiteralPath $manifestPath -Value $manifest -Encoding UTF8
 }
 
 if ((git status --porcelain) -and -not $SkipValidation) { throw 'Working tree has uncommitted changes.' }
