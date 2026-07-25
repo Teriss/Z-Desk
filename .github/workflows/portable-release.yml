@@ -27,7 +27,7 @@ jobs:
         run: |
           $version = '${{ github.ref_name }}' -replace '^v', ''
           [xml]$props = Get-Content Directory.Build.props
-          $projectVersion = ([string]($props.Project.PropertyGroup.ZDeskVersion | Select-Object -First 1)).Trim()
+          $projectVersion = (($props.Project.PropertyGroup.ZDeskVersion | Select-Object -First 1).InnerText).Trim()
           Write-Host "Tag version: $version; project version: $projectVersion"
           if ($version -ne $projectVersion) { throw "Tag v$version does not match Directory.Build.props version $projectVersion." }
           "value=$version" >> $env:GITHUB_OUTPUT
