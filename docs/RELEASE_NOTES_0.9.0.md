@@ -17,7 +17,7 @@
 
 | 类型 | 文件 | 大小 | SHA-256 |
 | --- | --- | ---: | --- |
-| 单文件便携版 | `artifacts/portable/ZDesk-0.9.0-win-x64/ZDesk.exe` | 75,542,781 字节 | `12C868951A2CEF216DD22E19AFECABA793D3B957ED18A58EBD04789F66AC9152` |
+| 单文件便携版 | `artifacts/portable/ZDesk-0.9.0-win-x64/ZDesk.exe` | 75,489,419 字节 | `FEB1366D9BC43533C77B1E6B79B99CB9B52EB6C0B60724DD061161B25A91FB43` |
 
 
 ## 平台说明
