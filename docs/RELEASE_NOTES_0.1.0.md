@@ -1,4 +1,4 @@
-# Z-Desk 0.9.0 发布说明
+# Z-Desk 0.1.0 发布说明
 
 ## 主要内容
 
@@ -17,7 +17,7 @@
 
 | 类型 | 文件 | 大小 | SHA-256 |
 | --- | --- | ---: | --- |
-| 单文件便携版 | `artifacts/portable/ZDesk-0.9.0-win-x64/ZDesk.exe` | 75,556,861 字节 | `CAC5E24CA282A839C4EBE9D25E498C1EE13C282A5D71AED865709A87F4D804CF` |
+| 单文件便携版 | GitHub Release 中的 `ZDesk.exe` | 以 Release 附带的 `.sha256` 文件为准 | 以 Release 附带的 `.sha256` 文件为准 |
 
 
 ## 平台说明

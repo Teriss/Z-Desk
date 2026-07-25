@@ -65,11 +65,7 @@ dotnet run --project ZDesk.csproj
 
 本项目仅分发单文件便携版 `ZDesk.exe`，不会安装额外服务或修改 Explorer；Win11 第一层菜单 MSIX 不包含在发布包中。布局内和布局自身的右键菜单不受影响。
 
-当前 0.9.0 发布产物：
-
-| 类型 | 文件 | 大小 | SHA-256 |
-| --- | --- | ---: | --- |
-| 单文件便携版 | `artifacts/portable/ZDesk-0.9.0-win-x64/ZDesk.exe` | 75,556,861 字节 | `CAC5E24CA282A839C4EBE9D25E498C1EE13C282A5D71AED865709A87F4D804CF` |
+当前版本和便携版下载地址请见 [GitHub Releases](https://github.com/Teriss/Z-Desk/releases)。每个 Release 同时提供 `ZDesk.exe` 和 `.sha256` 校验文件。
 
 
 ## 数据

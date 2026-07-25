@@ -1,5 +1,6 @@
 using ZDesk.Models;
 using ZDesk.Services;
+using ZDesk.Windows;
 
 var testRoot = Path.Combine(Path.GetTempPath(), $"ZDesk-smoke-{Guid.NewGuid():N}");
 var normalizedTemp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
@@ -22,6 +23,7 @@ try
     await TestRulesAsync(normalizedTestRoot);
     await TestLayoutPathMatchingAsync(normalizedTestRoot);
     TestLockedLayoutAssignment(normalizedTestRoot);
+    TestLockedLayoutOptions();
     await TestHotKeyAndDockPersistenceAsync(normalizedTestRoot);
     await TestLayoutBackupAsync(normalizedTestRoot);
     await TestFirstRunPresetsAsync(normalizedTestRoot);
@@ -327,6 +329,27 @@ static void TestLockedLayoutAssignment(string root)
     Assert(groupClone.IsRuleLocked, "locked tab state preserved when detached");
     var snapshotClone = SnapshotService.CloneGroups([lockedGroup]).Single();
     Assert(snapshotClone.Tabs.Single().IsRuleLocked, "locked tab state preserved in snapshots");
+}
+
+static void TestLockedLayoutOptions()
+{
+    var ordinary = new GroupDefinition { Title = "普通" };
+    var folder = new GroupDefinition { Title = "文件夹", Kind = GroupKind.Folder };
+    var combo = new GroupDefinition
+    {
+        Title = "组合",
+        Tabs =
+        [
+            new LayoutTab { Title = "普通页签", Kind = GroupKind.Empty },
+            new LayoutTab { Title = "文件夹页签", Kind = GroupKind.Folder }
+        ]
+    };
+    var options = LayoutLockWindow.CreateOptions([ordinary, folder, combo]).ToArray();
+    Assert(options.Length == 2, "lock dialog only lists rule-eligible layouts");
+    Assert(options.Any(option => option.Title == "普通"), "lock dialog lists ordinary layout");
+    Assert(options.Any(option => option.Title == "组合 / 普通页签"), "lock dialog labels combo tab");
+    Assert(options.All(option => option.Title != "文件夹" && option.Title != "组合 / 文件夹页签"),
+        "lock dialog excludes folder mappings");
 }
 
 static async Task TestHotKeyAndDockPersistenceAsync(string root)

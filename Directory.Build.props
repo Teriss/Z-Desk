@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <ZDeskVersion Condition="'$(ZDeskVersion)' == ''">0.9.0</ZDeskVersion>
+    <ZDeskVersion Condition="'$(ZDeskVersion)' == ''">0.1.0</ZDeskVersion>
     <Version>$(ZDeskVersion)</Version>
     <AssemblyVersion>$(ZDeskVersion).0</AssemblyVersion>
     <FileVersion>$(ZDeskVersion).0</FileVersion>

@@ -392,22 +392,20 @@
                 <TabItem Header="自动归类">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <Grid Margin="0,0,0,16">
-                        <Grid.RowDefinitions><RowDefinition Height="0" /><RowDefinition Height="150" /><RowDefinition Height="Auto" /><RowDefinition Height="520" /></Grid.RowDefinitions>
-                        <StackPanel Visibility="Collapsed">
-                            <TextBlock Text="布局" FontSize="24" FontWeight="SemiBold" />
-                            <TextBlock Text="普通布局可配置自动归类规则；映射布局展示真实文件夹。" Margin="0,4,0,14" Foreground="{StaticResource MutedBrush}" />
-                            <WrapPanel>
-                                <Button Content="＋ 映射布局" Click="AddFolderLayout_Click" />
-                                <Button Content="＋ 普通布局" Click="AddReferenceLayout_Click" />
-                                <Button Content="删除所选" Click="DeleteLayout_Click" />
-                            </WrapPanel>
-                        </StackPanel>
-                        <DataGrid x:Name="LayoutsGrid" Grid.Row="1" Visibility="Visible" AutoGenerateColumns="False" CanUserAddRows="False" CanUserSortColumns="False" CanUserReorderColumns="False">
-                            <DataGrid.Columns><DataGridTextColumn Header="名称" Binding="{Binding Title}" Width="150" /><DataGridTextColumn Header="类型" Binding="{Binding Kind}" Width="80" IsReadOnly="True" /><DataGridCheckBoxColumn Header="锁定规则" Binding="{Binding IsRuleLocked, Mode=TwoWay}" Width="90" /><DataGridTextColumn Header="映射 / 内容" Binding="{Binding Description}" Width="*" IsReadOnly="True" /></DataGrid.Columns>
-                        </DataGrid>
-                        <StackPanel Grid.Row="2" Margin="0,0,0,10">
-                            <DockPanel LastChildFill="False"><TextBlock Text="自动归类规则" FontSize="17" FontWeight="SemiBold" /><Button DockPanel.Dock="Right" Content="立即重新归类桌面" Background="#FF3566B6" BorderBrush="#FF6F9CDD" Margin="12,0,0,0" Click="ReapplyLayoutRules_Click" /></DockPanel>
-                            <TextBlock Text="预设只改变桌面图标的布局归属，不会移动真实文件；列表越靠上优先级越高。扩展名非空自动匹配文件，目录规则由目录预设确定；路径关键词与扩展名需同时满足。" Margin="0,4,0,9" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" />
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="520" /></Grid.RowDefinitions>
+                        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+                            <DockPanel LastChildFill="False">
+                                <StackPanel DockPanel.Dock="Left">
+                                    <TextBlock Text="自动归类规则" FontSize="17" FontWeight="SemiBold" />
+                                    <TextBlock Text="锁定布局后，重新应用规则不会移除、重新分配或修改该布局中已有内容。" Margin="0,4,0,0" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                                    <TextBlock x:Name="LockedLayoutSummaryText" Margin="0,8,12,0" Foreground="{StaticResource MutedBrush}" />
+                                    <Button Content="锁定布局" Click="LockLayouts_Click" />
+                                    <Button Content="立即重新归类桌面" Background="#FF3566B6" BorderBrush="#FF6F9CDD" Margin="0" Click="ReapplyLayoutRules_Click" />
+                                </StackPanel>
+                            </DockPanel>
+                            <TextBlock Text="预设只改变桌面图标的布局归属，不会移动真实文件；列表越靠上优先级越高。扩展名非空自动匹配文件，目录规则由目录预设确定；路径关键词与扩展名需同时满足。" Margin="0,8,0,9" Foreground="{StaticResource MutedBrush}" FontSize="11" TextWrapping="Wrap" />
                         <DockPanel LastChildFill="False">
                             <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
                                 <Button Content="＋ 添加规则" Click="AddBlankLayoutRule_Click" />
@@ -421,7 +419,7 @@
                         </DockPanel>
                             <Expander Header="自动刷新" Margin="0,7,0,0" Foreground="{StaticResource MutedBrush}"><WrapPanel Margin="18,8,0,2" VerticalAlignment="Center"><CheckBox x:Name="AutoRulesCheckBox" Content="定时应用规则" Margin="0,0,16,0" VerticalAlignment="Center" /><CheckBox x:Name="WatchRulesCheckBox" Content="桌面新增项目时应用" Margin="0,0,16,0" VerticalAlignment="Center" /><TextBlock Text="间隔（分钟）" VerticalAlignment="Center" /><TextBox x:Name="RuleIntervalTextBox" Width="54" Margin="7,0,0,0" Padding="7,4" VerticalContentAlignment="Center" /></WrapPanel></Expander>
                         </StackPanel>
-                        <DataGrid x:Name="LayoutRulesGrid" Grid.Row="3" AutoGenerateColumns="False" CanUserAddRows="False" CanUserSortColumns="False" CanUserReorderColumns="False" EnableRowVirtualization="True" EnableColumnVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling" AlternationCount="2" HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowHeaderWidth="0" Background="#FF1E1F26" Foreground="#FFE8E9EF" BorderBrush="#FF3B3C45" AllowDrop="True" PreviewDragOver="LayoutRulesGrid_PreviewDragOver" Drop="LayoutRulesGrid_Drop">
+                        <DataGrid x:Name="LayoutRulesGrid" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False" CanUserSortColumns="False" CanUserReorderColumns="False" EnableRowVirtualization="True" EnableColumnVirtualization="True" VirtualizingPanel.VirtualizationMode="Recycling" AlternationCount="2" HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowHeaderWidth="0" Background="#FF1E1F26" Foreground="#FFE8E9EF" BorderBrush="#FF3B3C45" AllowDrop="True" PreviewDragOver="LayoutRulesGrid_PreviewDragOver" Drop="LayoutRulesGrid_Drop">
                             <DataGrid.Columns>
                                 <DataGridTemplateColumn Header="顺序" Width="58"><DataGridTemplateColumn.CellTemplate><DataTemplate><Button Content="⋮⋮" ToolTip="拖动以调整匹配顺序" Tag="{Binding}" Padding="5,2" PreviewMouseLeftButtonDown="RuleDragHandle_PreviewMouseLeftButtonDown" PreviewMouseMove="RuleDragHandle_PreviewMouseMove" /></DataTemplate></DataGridTemplateColumn.CellTemplate></DataGridTemplateColumn>
                                 <DataGridCheckBoxColumn Header="启用" Binding="{Binding Enabled}" Width="52" />

@@ -140,12 +140,12 @@ public partial class SettingsWindow : Window
         foreach (var rule in ResultLayoutRules) AttachLayoutRule(rule);
         NormalizeLayoutRulePriorities();
         _layoutRows = new ObservableCollection<LayoutRow>(CreateLayoutRows(ResultGroups));
-        LayoutsGrid.ItemsSource = _layoutRows;
         LayoutRulesGrid.ItemsSource = ResultLayoutRules;
         HotKeysGrid.ItemsSource = Result.TopmostHotKeys;
         HotKeysGrid.SelectedItem = Result.TopmostHotKeys.FirstOrDefault();
         RefreshNormalLayoutChoices();
         RefreshHotKeyTargets();
+        UpdateLockedLayoutSummary();
 
         DoubleClickCheckBox.IsChecked = settings.DoubleClickHidesGroups;
         RememberHiddenCheckBox.IsChecked = settings.RememberGroupsHidden;
@@ -333,7 +333,6 @@ public partial class SettingsWindow : Window
     private bool PrepareForApply(out AppSettings result)
     {
         if (!TryBuildResult(out result)) return false;
-        LayoutsGrid.CommitEdit();
         LayoutRulesGrid.CommitEdit();
         NormalizeLayoutRulePriorities();
         Result = result;
@@ -438,6 +437,7 @@ public partial class SettingsWindow : Window
         RebuildLayoutRows();
         RefreshNormalLayoutChoices();
         RefreshHotKeyTargets();
+        UpdateLockedLayoutSummary();
     }
 
     private static string GetLayoutIdentity(IEnumerable<GroupDefinition> groups) => string.Join('|', groups.SelectMany(group =>
@@ -570,15 +570,22 @@ public partial class SettingsWindow : Window
 
     private void DeleteLayout_Click(object sender, RoutedEventArgs e)
     {
-        if (LayoutsGrid.SelectedItem is LayoutRow row)
-        {
-            if (row.Tab is null) ResultGroups.Remove(row.Host);
-            else if (row.Host.Tabs.Count > 1) row.Host.RemoveTab(row.Tab.Id);
-            else ResultGroups.Remove(row.Host);
-            RebuildLayoutRows();
-            RefreshNormalLayoutChoices();
-            MarkSettingsDirty();
-        }
+        return;
+    }
+
+    private void LockLayouts_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new LayoutLockWindow(ResultGroups) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        UpdateLockedLayoutSummary();
+        MarkSettingsDirty();
+    }
+
+    private void UpdateLockedLayoutSummary()
+    {
+        if (LockedLayoutSummaryText is null) return;
+        var count = LayoutLockWindow.CreateOptions(ResultGroups).Count(option => option.IsLocked);
+        LockedLayoutSummaryText.Text = $"已锁定 {count} 个";
     }
 
     private void AddBlankLayoutRule_Click(object sender, RoutedEventArgs e) => AddLayoutRule(string.Empty);
@@ -925,6 +932,7 @@ public partial class SettingsWindow : Window
     {
         _layoutRows.Clear();
         foreach (var row in CreateLayoutRows(ResultGroups)) _layoutRows.Add(row);
+        UpdateLockedLayoutSummary();
     }
 
     private void UpdateOpacityText()
