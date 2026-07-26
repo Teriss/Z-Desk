@@ -68,6 +68,10 @@ dotnet run --project ZDesk.csproj
 当前版本和便携版下载地址请见 [GitHub Releases](https://github.com/Teriss/Z-Desk/releases)。每个 Release 同时提供 `ZDesk.exe` 和 `.sha256` 校验文件。
 
 
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
 ## 数据
 
 默认数据目录 `%LocalAppData%\ZDesk`，日志目录 `%LocalAppData%\ZDesk\logs`。设置中可修改，迁移采用复制并保留源目录备份。状态文件为 `layout.json`，保存前生成 `layout.backup.json`。
