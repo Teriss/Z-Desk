@@ -61,6 +61,8 @@ dotnet build tests\ZDesk.SmokeTests\ZDesk.SmokeTests.csproj -c Debug -p:SelfCont
 
 - 发布相关或可能受配置差异影响的改动，还要执行 `dotnet build ZDesk.csproj -c Release`。
 - 便携版改动执行 `scripts/publish-portable.ps1`；正式发布完整遵循 `docs/RELEASE_CHECKLIST.md`。
+- 发布 GitHub Release 时，必须准备对应版本的人工更新笔记（例如 `docs/RELEASE_NOTES_0.1.2.md`），正文只介绍用户可感知的改动、修复和性能变化，不用冷冰冰的 commit log 代替。
+- 发布前必须核对 GitHub Release 的实际 Description 已包含这份人工更新笔记；仅启用 `generate_release_notes` 或看到自动生成的 Full Changelog 不算完成。若自动化流程不能注入正文，应在交付前明确留下手动编辑步骤，不能声称 Release 更新笔记已发布。
 - UI、Shell、Explorer、拖放、回收站、快捷键、多显示器和 DPI 等无法完全自动验证的行为，必须记录具体人工验收项和未验证原因。
 - 纯文档改动可不运行应用构建，但要检查链接、路径、命令、命名规则以及 `git diff --check`，并在交付说明中明确验证范围。
 - 测试生成的 `bin/`、`obj/`、`artifacts/` 和 C++ 中间文件不得提交。
