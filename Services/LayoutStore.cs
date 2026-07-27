@@ -180,6 +180,7 @@ public sealed class LayoutStore
             if (!Enum.IsDefined(group.DockEdge)) group.DockEdge = DockEdge.None;
             if (!Enum.IsDefined(group.ViewMode)) group.ViewMode = LayoutViewMode.MediumIcons;
             if (!Enum.IsDefined(group.SortProperty)) group.SortProperty = LayoutSortProperty.Manual;
+            LayoutItemStateService.Normalize(group);
         }
 
         foreach (var rule in state.Rules)

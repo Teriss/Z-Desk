@@ -13,6 +13,42 @@ public static class ShellContextMenuService
     private const uint MfString = 0x0000;
     private const uint RenameCommand = 0x7F00;
     private const int SwShowNormal = 1;
+    private static int _warmUpStarted;
+
+    public static Task WarmUpAsync(IEnumerable<string> paths)
+    {
+        var existing = paths.Where(candidate => File.Exists(candidate) || Directory.Exists(candidate)).ToArray();
+        var path = existing.FirstOrDefault(candidate =>
+                       candidate.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) ||
+                       candidate.EndsWith(".url", StringComparison.OrdinalIgnoreCase))
+                   ?? existing.FirstOrDefault();
+        if (path is null || Interlocked.Exchange(ref _warmUpStarted, 1) != 0)
+            return Task.CompletedTask;
+
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                WarmUp(path);
+            }
+            catch (Exception ex)
+            {
+                LogService.Warning("Shell context menu warm-up failed", ex);
+            }
+            finally
+            {
+                completion.TrySetResult();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ZDesk Shell menu warm-up"
+        };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        return completion.Task;
+    }
 
     public static bool Show(nint owner, IReadOnlyList<string> paths, int screenX, int screenY, Action? renameAction = null)
     {
@@ -194,6 +230,38 @@ public static class ShellContextMenuService
         var common = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
         return string.Equals(parent, user, StringComparison.OrdinalIgnoreCase) ||
                string.Equals(parent, common, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void WarmUp(string path)
+    {
+        nint pidl = nint.Zero;
+        nint contextPointer = nint.Zero;
+        nint menu = nint.Zero;
+        IShellFolder? parentFolder = null;
+        object? contextMenuObject = null;
+        try
+        {
+            if (SHParseDisplayName(path, nint.Zero, out pidl, 0, out _) != 0) return;
+            var shellFolderId = typeof(IShellFolder).GUID;
+            if (SHBindToParent(pidl, ref shellFolderId, out parentFolder, out var child) != 0) return;
+            var contextMenuId = typeof(IContextMenu).GUID;
+            if (parentFolder.GetUIObjectOf(nint.Zero, 1, [child], ref contextMenuId, nint.Zero, out contextPointer) != 0)
+                return;
+            contextMenuObject = Marshal.GetObjectForIUnknown(contextPointer);
+            Marshal.Release(contextPointer);
+            contextPointer = nint.Zero;
+            menu = CreatePopupMenu();
+            if (menu == nint.Zero) return;
+            ((IContextMenu)contextMenuObject).QueryContextMenu(menu, 0, 1, 0x7DFF, CmfNormal);
+        }
+        finally
+        {
+            if (menu != nint.Zero) DestroyMenu(menu);
+            if (contextMenuObject is not null) Marshal.FinalReleaseComObject(contextMenuObject);
+            if (contextPointer != nint.Zero) Marshal.Release(contextPointer);
+            if (parentFolder is not null) Marshal.FinalReleaseComObject(parentFolder);
+            if (pidl != nint.Zero) Marshal.FreeCoTaskMem(pidl);
+        }
     }
 
     private static uint TrackShellMenu(object contextMenu, nint menu, int x, int y, nint owner)

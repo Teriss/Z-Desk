@@ -66,6 +66,9 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private string _folderSignature = string.Empty;
     private string _pendingFolderChangeDetail = "none";
     private readonly HashSet<string> _pendingFolderChangePaths = new(StringComparer.OrdinalIgnoreCase);
+    private bool _folderRefreshRunning;
+    private bool _folderRefreshPending;
+    private int _folderRefreshVersion;
     private bool _layoutMenuOpen;
     private bool _collapsedByAuto;
 
@@ -120,13 +123,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         AnimationSpeed = Math.Clamp(animationSpeed, 0.5, 2.0);
         ApplyViewMode();
         _folderRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(280) };
-        _folderRefreshTimer.Tick += async (_, _) =>
-        {
-            _folderRefreshTimer.Stop();
-            var snapshotChanged = FolderSnapshotChanged();
-            LogService.Info($"Folder refresh decision | group={Definition.Title} | event={_pendingFolderChangeDetail} | changed={snapshotChanged}");
-            if (snapshotChanged) await ReconcileFolderItemsAsync();
-        };
+        _folderRefreshTimer.Tick += FolderRefreshTimer_Tick;
         _offlineRetryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
         _offlineRetryTimer.Tick += (_, _) =>
         {
@@ -177,6 +174,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         _autoCollapseTimer.Stop();
         _watcher?.Dispose();
         _watcher = null;
+        DisposeFileEntries();
     }
 
     private void ApplyDefinition()
@@ -354,8 +352,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
         var selectedPaths = SelectedEntries().Select(entry => entry.FullPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        _files.Clear();
-        foreach (var entry in sorted) _files.Add(entry);
+        ApplyEntryOrder(sorted);
         foreach (var entry in sorted.Where(entry => selectedPaths.Contains(entry.FullPath)))
             FileList.SelectedItems.Add(entry);
 
@@ -473,17 +470,12 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private void LoadFolder()
     {
         ++_sortVersion;
-        LogService.Info($"LoadFolder | group={Definition.Title} | kind={Definition.Kind} | persistedOrder={string.Join(",", Definition.ItemOrder.Select(Path.GetFileName))}");
         _watcher?.Dispose();
         _watcher = null;
-        _files.Clear();
-
         if (Definition.Kind != GroupKind.Folder || string.IsNullOrWhiteSpace(Definition.FolderPath))
         {
-            foreach (var path in OrderPaths(Definition.PinnedPaths.Where(path => File.Exists(path) || Directory.Exists(path))))
-            {
-                _files.Add(new FileEntry(Path.GetFileName(Path.TrimEndingDirectorySeparator(path)), path, Directory.Exists(path)));
-            }
+            LayoutItemStateService.Normalize(Definition.PinnedPaths, Definition.ItemOrder);
+            SynchronizePinnedItems();
             EmptyMessage.Text = _files.Count == 0 ? "将文件或文件夹拖到这里固定引用" : string.Empty;
             EmptyMessagePanel.Visibility = Visibility.Collapsed;
             QueueSavedSort();
@@ -493,6 +485,8 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         var folder = Definition.FolderPath;
         if (!Directory.Exists(folder))
         {
+            DisposeFileEntries();
+            _folderSignature = string.Empty;
             EmptyMessage.Text = "映射目录当前不可用";
             EmptyMessagePanel.Visibility = Visibility.Visible;
             _offlineRetryTimer.Start();
@@ -503,31 +497,11 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
         try
         {
-            var entries = Directory.EnumerateDirectories(folder)
-                .Select(path => new FileEntry(Path.GetFileName(path), path, true))
-                .Concat(Directory.EnumerateFiles(folder)
-                    .Select(path => new FileEntry(Path.GetFileName(path), path, false)))
-                .Take(500)
-                .ToList();
-
-            var order = Definition.ItemOrder
-                .Select((path, index) => (path, index))
-                .ToDictionary(item => item.path, item => item.index, StringComparer.OrdinalIgnoreCase);
-            entries = entries
-                .OrderBy(entry => order.TryGetValue(entry.FullPath, out var index) ? 0 : 1)
-                .ThenBy(entry => order.TryGetValue(entry.FullPath, out var index) ? index : int.MaxValue)
-                .ThenByDescending(entry => entry.IsDirectory)
-                .ThenBy(entry => entry.Name, StringComparer.CurrentCultureIgnoreCase)
-                .ToList();
-
-            foreach (var entry in entries)
-            {
-                _files.Add(entry);
-            }
-            _folderSignature = BuildFolderSignature(entries.Select(entry => entry.FullPath));
+            var paths = Directory.EnumerateFileSystemEntries(folder).Take(500).ToArray();
+            ApplyFolderPaths(paths);
+            _folderSignature = BuildFolderSignature(paths);
             PersistCurrentOrder();
             QueueSavedSort();
-            LogService.Info($"LoadFolder complete | group={Definition.Title} | renderedOrder={string.Join(",", _files.Select(entry => entry.Name))}");
 
             EmptyMessage.Text = _files.Count == 0 ? "这个文件夹是空的" : string.Empty;
             EmptyMessagePanel.Visibility = Visibility.Collapsed;
@@ -556,7 +530,11 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     public void RefreshItems()
     {
-        LogService.Info($"Targeted refresh requested | group={Definition.Title}");
+        if (Definition.Kind == GroupKind.Empty)
+        {
+            SynchronizePinnedItems();
+            return;
+        }
         LoadFolder();
     }
 
@@ -574,40 +552,128 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             if (entry is null || (!File.Exists(rename.FullPath) && !Directory.Exists(rename.FullPath))) continue;
             var index = _files.IndexOf(entry);
             _files[index] = CreateEntry(rename.FullPath);
+            entry.Dispose();
             if (selected.Remove(rename.OldFullPath!)) selected.Add(rename.FullPath);
             if (string.Equals(_focusedEntryPath, rename.OldFullPath, StringComparison.OrdinalIgnoreCase))
                 _focusedEntryPath = rename.FullPath;
         }
 
-        var desired = Definition.PinnedPaths
-            .Where(path => File.Exists(path) || Directory.Exists(path))
+        SynchronizePinnedItems(selected);
+    }
+
+    private void SynchronizePinnedItems(HashSet<string>? selected = null)
+    {
+        selected ??= SelectedEntries().Select(entry => entry.FullPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var desired = OrderPaths(Definition.PinnedPaths
+                .Where(path => File.Exists(path) || Directory.Exists(path)))
+            .ToArray();
+        var existing = new Dictionary<string, FileEntry>(StringComparer.OrdinalIgnoreCase);
         for (var index = _files.Count - 1; index >= 0; index--)
         {
-            if (!desired.Contains(_files[index].FullPath)) _files.RemoveAt(index);
+            var entry = _files[index];
+            if (!existing.TryAdd(entry.FullPath, entry))
+            {
+                _files.RemoveAt(index);
+                entry.Dispose();
+            }
         }
 
-        var current = _files.Select(entry => entry.FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var path in OrderPaths(Definition.PinnedPaths).Where(path => desired.Contains(path)))
+        for (var targetIndex = 0; targetIndex < desired.Length; targetIndex++)
         {
-            if (current.Add(path)) _files.Add(CreateEntry(path));
+            var path = desired[targetIndex];
+            if (!existing.TryGetValue(path, out var entry))
+            {
+                entry = CreateEntry(path);
+                existing[path] = entry;
+            }
+
+            var currentIndex = _files.IndexOf(entry);
+            if (currentIndex < 0) _files.Insert(targetIndex, entry);
+            else if (currentIndex != targetIndex) _files.Move(currentIndex, targetIndex);
         }
 
+        while (_files.Count > desired.Length)
+        {
+            var entry = _files[^1];
+            _files.RemoveAt(_files.Count - 1);
+            entry.Dispose();
+        }
+
+        FileList.SelectedItems.Clear();
         foreach (var entry in _files.Where(entry => selected.Contains(entry.FullPath)))
             FileList.SelectedItems.Add(entry);
+        EmptyMessage.Text = _files.Count == 0 ? "将文件或文件夹拖到这里固定引用" : string.Empty;
         if (Definition.SortProperty != LayoutSortProperty.Manual) _ = SortCurrentItemsAsync(notify: false);
+    }
+
+    private void ApplyFolderPaths(IReadOnlyList<string> paths, IReadOnlySet<string>? changedPaths = null)
+    {
+        var order = LayoutItemStateService.BuildOrderIndex(Definition.ItemOrder);
+        var desired = paths
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => order.TryGetValue(path, out var index) ? 0 : 1)
+            .ThenBy(path => order.TryGetValue(path, out var index) ? index : int.MaxValue)
+            .ThenByDescending(path => Directory.Exists(path))
+            .ThenBy(path => Path.GetFileName(path), StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        var desiredSet = desired.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var existing = new Dictionary<string, FileEntry>(StringComparer.OrdinalIgnoreCase);
+
+        for (var index = _files.Count - 1; index >= 0; index--)
+        {
+            var entry = _files[index];
+            if (!desiredSet.Contains(entry.FullPath) || !existing.TryAdd(entry.FullPath, entry))
+            {
+                _files.RemoveAt(index);
+                entry.Dispose();
+            }
+        }
+
+        for (var targetIndex = 0; targetIndex < desired.Length; targetIndex++)
+        {
+            var path = desired[targetIndex];
+            if (!existing.TryGetValue(path, out var entry) ||
+                (changedPaths?.Contains(path) == true))
+            {
+                var replacement = CreateEntry(path);
+                if (entry is not null)
+                {
+                    var oldIndex = _files.IndexOf(entry);
+                    if (oldIndex >= 0) _files[oldIndex] = replacement;
+                    entry.Dispose();
+                }
+                existing[path] = replacement;
+                entry = replacement;
+            }
+
+            var currentIndex = _files.IndexOf(entry);
+            if (currentIndex < 0) _files.Insert(targetIndex, entry);
+            else if (currentIndex != targetIndex) _files.Move(currentIndex, targetIndex);
+        }
+
+        while (_files.Count > desired.Length)
+        {
+            var entry = _files[^1];
+            _files.RemoveAt(_files.Count - 1);
+            entry.Dispose();
+        }
+    }
+
+    private void DisposeFileEntries()
+    {
+        foreach (var entry in _files) entry.Dispose();
+        _files.Clear();
     }
 
     private IEnumerable<string> OrderPaths(IEnumerable<string> paths)
     {
-        var order = Definition.ItemOrder.Select((path, index) => (path, index))
-            .ToDictionary(item => item.path, item => item.index, StringComparer.OrdinalIgnoreCase);
+        var order = LayoutItemStateService.BuildOrderIndex(Definition.ItemOrder);
         return paths.OrderBy(path => order.TryGetValue(path, out var index) ? index : int.MaxValue);
     }
 
     private void PersistCurrentOrder()
     {
-        LogService.Info($"Persist order | group={Definition.Title} | previous={string.Join(",", Definition.ItemOrder.Select(Path.GetFileName))} | next={string.Join(",", _files.Select(entry => entry.Name))}");
         Definition.ItemOrder = _files.Select(entry => entry.FullPath).ToList();
         if (Definition.Kind == GroupKind.Empty)
         {
@@ -623,12 +689,51 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             _pendingFolderChangePaths.Add(e.FullPath);
             if (e is RenamedEventArgs renamed) _pendingFolderChangePaths.Add(renamed.OldFullPath);
         }
-        LogService.Info($"Folder watcher event | group={Definition.Title} | event={_pendingFolderChangeDetail}");
         Dispatcher.BeginInvoke(() =>
         {
             _folderRefreshTimer.Stop();
             _folderRefreshTimer.Start();
         }, DispatcherPriority.Background);
+    }
+
+    private async void FolderRefreshTimer_Tick(object? sender, EventArgs e)
+    {
+        _folderRefreshTimer.Stop();
+        if (_folderRefreshRunning)
+        {
+            _folderRefreshPending = true;
+            return;
+        }
+
+        _folderRefreshRunning = true;
+        try
+        {
+            var folder = Definition.FolderPath;
+            if (Definition.Kind != GroupKind.Folder || string.IsNullOrWhiteSpace(folder))
+            {
+                LoadFolder();
+                return;
+            }
+
+            var version = ++_folderRefreshVersion;
+            var snapshot = await Task.Run(() => CaptureFolderSnapshot(folder));
+            if (version != _folderRefreshVersion || snapshot is null) return;
+            if (!string.Equals(_folderSignature, snapshot.Signature, StringComparison.Ordinal))
+                await ReconcileFolderItemsAsync(snapshot.Paths, snapshot.Signature);
+        }
+        catch (Exception ex)
+        {
+            LogService.Warning($"Folder refresh failed: {Definition.FolderPath}", ex);
+        }
+        finally
+        {
+            _folderRefreshRunning = false;
+            if (_folderRefreshPending)
+            {
+                _folderRefreshPending = false;
+                _folderRefreshTimer.Start();
+            }
+        }
     }
 
     private bool FolderSnapshotChanged()
@@ -654,7 +759,22 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             return $"{path}\u001f{stamp.Ticks}\u001f{size}";
         }));
 
-    private async Task ReconcileFolderItemsAsync()
+    private sealed record FolderSnapshot(string[] Paths, string Signature);
+
+    private static FolderSnapshot? CaptureFolderSnapshot(string folder)
+    {
+        try
+        {
+            var paths = Directory.EnumerateFileSystemEntries(folder).Take(500).ToArray();
+            return new FolderSnapshot(paths, BuildFolderSignature(paths));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private async Task ReconcileFolderItemsAsync(IReadOnlyList<string>? snapshotPaths = null, string? snapshotSignature = null)
     {
         if (Definition.Kind != GroupKind.Folder || string.IsNullOrWhiteSpace(Definition.FolderPath) ||
             !Directory.Exists(Definition.FolderPath))
@@ -665,8 +785,11 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
         try
         {
-            var paths = Directory.EnumerateFileSystemEntries(Definition.FolderPath).Take(500).ToArray();
-            var desired = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var snapshot = snapshotPaths is null
+                ? await Task.Run(() => CaptureFolderSnapshot(Definition.FolderPath!))
+                : new FolderSnapshot(snapshotPaths.ToArray(), snapshotSignature ?? BuildFolderSignature(snapshotPaths));
+            if (snapshot is null) return;
+            var paths = snapshot.Paths;
             HashSet<string> changed;
             lock (_pendingFolderChangePaths)
             {
@@ -676,29 +799,13 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
             var selected = SelectedEntries().Select(entry => entry.FullPath)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            for (var index = _files.Count - 1; index >= 0; index--)
-            {
-                if (!desired.Contains(_files[index].FullPath)) _files.RemoveAt(index);
-            }
+            ApplyFolderPaths(paths, changed);
 
-            var current = _files.ToDictionary(entry => entry.FullPath, StringComparer.OrdinalIgnoreCase);
-            foreach (var path in paths)
-            {
-                if (!current.TryGetValue(path, out var existing))
-                {
-                    _files.Add(CreateEntry(path));
-                    continue;
-                }
-
-                if (!changed.Contains(path)) continue;
-                var index = _files.IndexOf(existing);
-                if (index >= 0) _files[index] = CreateEntry(path);
-            }
-
+            FileList.SelectedItems.Clear();
             foreach (var entry in _files.Where(entry => selected.Contains(entry.FullPath)))
                 FileList.SelectedItems.Add(entry);
 
-            _folderSignature = BuildFolderSignature(paths);
+            _folderSignature = snapshot.Signature;
             PersistCurrentOrder();
             Definition.StoreActiveTab();
             if (Definition.SortProperty != LayoutSortProperty.Manual)
@@ -1197,9 +1304,9 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
         if (effect == DragDropEffects.Move && Definition.Kind == GroupKind.Empty && !_internalReorderCompleted)
         {
-            foreach (var path in paths) Definition.PinnedPaths.RemoveAll(item =>
-                string.Equals(item, path, StringComparison.OrdinalIgnoreCase));
-            LoadFolder();
+            LayoutItemStateService.RemovePinnedPaths(Definition.PinnedPaths, Definition.ItemOrder, paths);
+            SynchronizePinnedItems();
+            Definition.StoreActiveTab();
             LayoutChanged?.Invoke(this, EventArgs.Empty);
         }
         _internalReorderCompleted = false;
@@ -1255,10 +1362,11 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         {
             foreach (var path in pinned.Where(path => File.Exists(path) || Directory.Exists(path)))
             {
-                if (!Definition.PinnedPaths.Contains(path, StringComparer.OrdinalIgnoreCase)) Definition.PinnedPaths.Add(path);
+                LayoutItemStateService.AddPinnedPath(Definition.PinnedPaths, Definition.ItemOrder, path);
             }
             DropOverlay.Visibility = Visibility.Collapsed;
-            LoadFolder();
+            SynchronizePinnedItems();
+            Definition.StoreActiveTab();
             LayoutChanged?.Invoke(this, EventArgs.Empty);
             StatusChanged?.Invoke(this, $"已将 {pinned.Length} 项移入布局");
             e.Effects = DragDropEffects.Move;
@@ -1342,13 +1450,23 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         ordered.InsertRange(targetIndex, moving);
         Definition.SortProperty = LayoutSortProperty.Manual;
         Definition.SortDescending = false;
-        _files.Clear();
-        foreach (var entry in ordered) _files.Add(entry);
+        ApplyEntryOrder(ordered);
         PersistCurrentOrder();
         Definition.StoreActiveTab();
         UpdateSortHeaders();
         _internalReorderCompleted = true;
         LayoutChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void ApplyEntryOrder(IReadOnlyList<FileEntry> ordered)
+    {
+        for (var targetIndex = 0; targetIndex < ordered.Count; targetIndex++)
+        {
+            var entry = ordered[targetIndex];
+            var currentIndex = _files.IndexOf(entry);
+            if (currentIndex < 0) _files.Insert(targetIndex, entry);
+            else if (currentIndex != targetIndex) _files.Move(currentIndex, targetIndex);
+        }
     }
 
     private int GetDropIndex(Point position)
@@ -1484,7 +1602,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         if (host is null || paths.Length == 0) return;
         var screen = PointToScreen(e.GetPosition(this));
         var handle = new System.Windows.Interop.WindowInteropHelper(host).Handle;
-        LogService.Info($"Item context menu open | group={Definition.Title} | selected={string.Join(",", paths.Select(Path.GetFileName))} | selectedCount={paths.Length} | order={string.Join(",", _files.Select(entry => entry.Name))}");
+        LogService.Info($"Item context menu open | group={Definition.Title} | selectedCount={paths.Length}");
         _layoutMenuOpen = true;
         var menuShown = false;
         try
@@ -1499,7 +1617,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         }
         if (menuShown)
         {
-            LogService.Info($"Item context menu closed | group={Definition.Title} | order={string.Join(",", _files.Select(entry => entry.Name))}");
+            LogService.Info($"Item context menu closed | group={Definition.Title}");
             e.Handled = true;
         }
     }

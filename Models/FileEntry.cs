@@ -17,6 +17,7 @@ public sealed class FileEntry : INotifyPropertyChanged
     private string _modifiedText = string.Empty;
     private DateTime _modifiedTime;
     private long? _sizeBytes;
+    private readonly CancellationTokenSource _lifetime = new();
     private readonly Task _metadataLoadTask;
 
     public string Name { get; }
@@ -71,7 +72,14 @@ public sealed class FileEntry : INotifyPropertyChanged
 
     private async Task LoadMetadataAsync()
     {
-        await MetadataLoadGate.WaitAsync();
+        try
+        {
+            await MetadataLoadGate.WaitAsync(_lifetime.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
         try
         {
             var metadata = await Task.Run(() =>
@@ -86,6 +94,7 @@ public sealed class FileEntry : INotifyPropertyChanged
                 var file = new FileInfo(FullPath);
                 return (typeName, FormatSize(file.Length), file.LastWriteTime, (long?)file.Length);
             });
+            if (_lifetime.IsCancellationRequested) return;
             var dispatcher = Application.Current?.Dispatcher;
             if (dispatcher is null)
             {
@@ -99,6 +108,7 @@ public sealed class FileEntry : INotifyPropertyChanged
             {
                 await dispatcher.InvokeAsync(() =>
                 {
+                    if (_lifetime.IsCancellationRequested) return;
                     TypeName = metadata.typeName;
                     SizeText = metadata.Item2;
                     ModifiedTime = metadata.Item3;
@@ -132,13 +142,24 @@ public sealed class FileEntry : INotifyPropertyChanged
 
     private async Task LoadIconAsync()
     {
-        await IconLoadGate.WaitAsync();
+        try
+        {
+            await IconLoadGate.WaitAsync(_lifetime.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
         try
         {
             var icon = await Task.Run(() => ShellIconService.GetDisplayImage(FullPath, IsDirectory));
+            if (_lifetime.IsCancellationRequested) return;
             if (Application.Current?.Dispatcher is { } dispatcher && !dispatcher.CheckAccess())
             {
-                await dispatcher.InvokeAsync(() => IconSource = icon);
+                await dispatcher.InvokeAsync(() =>
+                {
+                    if (!_lifetime.IsCancellationRequested) IconSource = icon;
+                });
             }
             else
             {
@@ -153,6 +174,11 @@ public sealed class FileEntry : INotifyPropertyChanged
         {
             IconLoadGate.Release();
         }
+    }
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>

@@ -1,3 +1,4 @@
+using ZDesk.Controls;
 using ZDesk.Models;
 using ZDesk.Services;
 using ZDesk.Windows;
@@ -24,6 +25,7 @@ try
     await TestLayoutPathMatchingAsync(normalizedTestRoot);
     TestLockedLayoutAssignment(normalizedTestRoot);
     TestLockedLayoutOptions();
+    await TestLayoutItemStateRepairAsync(normalizedTestRoot);
     await TestHotKeyAndDockPersistenceAsync(normalizedTestRoot);
     await TestLayoutBackupAsync(normalizedTestRoot);
     await TestFirstRunPresetsAsync(normalizedTestRoot);
@@ -37,6 +39,7 @@ try
     TestUpdateRollbackPreparation(normalizedTestRoot);
     TestShellIcons(normalizedTestRoot);
     TestDesktopWindowStyle(normalizedTestRoot);
+    TestIncrementalLayoutItemSync(normalizedTestRoot);
     Console.WriteLine("All Z-Desk smoke tests passed.");
 }
 finally
@@ -157,6 +160,72 @@ static void TestDesktopSelectionBoundary(string root)
     Assert(!DesktopShellSelectionService.IsPhysicalDesktopPath(mapped), "mapped path is not physical desktop");
     Assert(!new DesktopShellSelectionService().TrySelect([mapped]),
         "mapped selection does not navigate or synchronize Explorer");
+}
+
+static void TestIncrementalLayoutItemSync(string root)
+{
+    var firstPath = Path.Combine(root, "incremental-first.txt");
+    var secondPath = Path.Combine(root, "incremental-second.txt");
+    var thirdPath = Path.Combine(root, "incremental-third.txt");
+    File.WriteAllText(firstPath, "first");
+    File.WriteAllText(secondPath, "second");
+    File.WriteAllText(thirdPath, "third");
+
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        ZDesk.App? app = null;
+        var ownsApp = false;
+        GroupContainer? container = null;
+        try
+        {
+            app = System.Windows.Application.Current as ZDesk.App;
+            if (app is null)
+            {
+                app = new ZDesk.App();
+                app.InitializeComponent();
+                ownsApp = true;
+            }
+            var definition = new GroupDefinition
+            {
+                Title = "incremental-sync",
+                SortProperty = LayoutSortProperty.Manual,
+                PinnedPaths = [firstPath, secondPath, thirdPath],
+                ItemOrder = [firstPath, secondPath, thirdPath]
+            };
+            container = new GroupContainer(definition, animationsEnabled: false);
+            var entriesField = typeof(GroupContainer).GetField("_files",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var entries = entriesField?.GetValue(container) as System.Collections.ObjectModel.ObservableCollection<FileEntry>;
+            if (entries is null || entries.Count != 3)
+                throw new InvalidOperationException("incremental sync test could not inspect initial entries");
+
+            var second = entries.Single(entry => entry.FullPath == secondPath);
+            var third = entries.Single(entry => entry.FullPath == thirdPath);
+            definition.PinnedPaths.Remove(firstPath);
+            definition.ItemOrder.Remove(firstPath);
+            var synchronize = typeof(GroupContainer).GetMethod("SynchronizePinnedItems",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            synchronize?.Invoke(container, [null]);
+
+            Assert(entries.Count == 2, "incremental sync removes only the moved item");
+            Assert(ReferenceEquals(entries[0], second) && ReferenceEquals(entries[1], third),
+                "incremental sync preserves unchanged FileEntry instances");
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+        finally
+        {
+            container?.Dispose();
+            if (ownsApp) app?.Shutdown();
+        }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    if (failure is not null) throw new InvalidOperationException("Incremental layout item sync test failed.", failure);
 }
 
 static void TestLayoutRuleNotifications()
@@ -350,6 +419,53 @@ static void TestLockedLayoutOptions()
     Assert(options.Any(option => option.Title == "组合 / 普通页签"), "lock dialog labels combo tab");
     Assert(options.All(option => option.Title != "文件夹" && option.Title != "组合 / 文件夹页签"),
         "lock dialog excludes folder mappings");
+}
+
+static async Task TestLayoutItemStateRepairAsync(string root)
+{
+    var first = Path.Combine(root, "layout-item-first.lnk");
+    var second = Path.Combine(root, "layout-item-second.lnk");
+    var orphan = Path.Combine(root, "layout-item-orphan.lnk");
+    var group = new GroupDefinition
+    {
+        Title = "inconsistent",
+        PinnedPaths = [first, first.ToUpperInvariant(), second],
+        ItemOrder = [orphan, first, first.ToUpperInvariant()]
+    };
+
+    Assert(LayoutItemStateService.Normalize(group), "inconsistent layout state is repaired");
+    Assert(group.PinnedPaths.SequenceEqual([first, second], StringComparer.OrdinalIgnoreCase),
+        "layout pinned paths are unique");
+    Assert(group.ItemOrder.SequenceEqual([first, second], StringComparer.OrdinalIgnoreCase),
+        "layout order removes stale entries and appends missing pins");
+
+    Assert(LayoutItemStateService.RemovePinnedPaths(group.PinnedPaths, group.ItemOrder, [first]),
+        "cross-layout source removal updates state");
+    Assert(!group.PinnedPaths.Contains(first, StringComparer.OrdinalIgnoreCase) &&
+           !group.ItemOrder.Contains(first, StringComparer.OrdinalIgnoreCase),
+        "cross-layout source removes ownership and order");
+    Assert(LayoutItemStateService.AddPinnedPath(group.PinnedPaths, group.ItemOrder, first),
+        "cross-layout target add updates state");
+    Assert(group.PinnedPaths.Last() == first && group.ItemOrder.Last() == first,
+        "cross-layout target adds ownership and order together");
+
+    var stateDirectory = Path.Combine(root, "layout-item-state-repair");
+    var tab = new LayoutTab
+    {
+        Title = "tab",
+        PinnedPaths = [first, second],
+        ItemOrder = [orphan, first, first]
+    };
+    var host = new GroupDefinition { Tabs = [tab], ActiveTabIndex = 0 };
+    host.ReloadActiveTab();
+    var store = new LayoutStore(stateDirectory);
+    await store.SaveAsync(new AppState { Groups = [host] });
+    var loaded = await store.LoadAsync();
+    var loadedHost = loaded.Groups.Single();
+    Assert(loadedHost.Tabs.Single().ItemOrder.SequenceEqual([first, second], StringComparer.OrdinalIgnoreCase),
+        "layout load repairs tab order");
+    Assert(loadedHost.ItemOrder.SequenceEqual(loadedHost.Tabs.Single().ItemOrder, StringComparer.OrdinalIgnoreCase),
+        "layout load synchronizes repaired active tab");
 }
 
 static async Task TestHotKeyAndDockPersistenceAsync(string root)

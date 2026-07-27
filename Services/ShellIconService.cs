@@ -13,39 +13,66 @@ public static class ShellIconService
     private const uint ShgfiIcon = 0x000000100;
     private const uint ShgfiLargeIcon = 0x000000000;
     private const uint ShgfiTypeName = 0x000000400;
-    private static readonly ConcurrentDictionary<string, ImageSource?> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxImageCacheEntries = 1024;
+    private static readonly object CacheGate = new();
+    private static readonly Dictionary<string, ImageSource?> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Queue<string> CacheOrder = new();
     private static readonly ConcurrentDictionary<string, string> TypeNameCache = new(StringComparer.OrdinalIgnoreCase);
 
     public static ImageSource? GetIcon(string path, bool isDirectory)
     {
         var key = isDirectory ? $"directory:{path}" : path;
-        return Cache.GetOrAdd(key, _ => LoadIcon(path));
+        return GetCachedImage(key, () => LoadIcon(path));
     }
 
     public static ImageSource? GetDisplayImage(string path, bool isDirectory, int requestedSize = 96)
     {
         if (path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
         {
-            // Explorer shortcuts may point to an executable with no usable
-            // thumbnail while carrying their real icon in IconLocation.
-            var shortcutIcon = LoadShellIcon(path);
-            if (shortcutIcon is not null) return shortcutIcon;
-            if (TryResolveShortcutTarget(path, out var target))
-                return GetDisplayImage(target, Directory.Exists(target), requestedSize);
-            return GetIcon(path, isDirectory);
+            var shortcutSize = Math.Clamp(requestedSize, 16, 256);
+            var shortcutKey = $"shortcut:{path}:{GetLastWriteStamp(path)}:{shortcutSize}";
+            return GetCachedImage(shortcutKey, () =>
+            {
+                // Explorer shortcuts may point to an executable with no usable
+                // thumbnail while carrying their real icon in IconLocation.
+                var shortcutIcon = LoadShellIcon(path);
+                if (shortcutIcon is not null) return shortcutIcon;
+                if (TryResolveShortcutTarget(path, out var target))
+                    return GetDisplayImage(target, Directory.Exists(target), requestedSize);
+                return GetIcon(path, isDirectory);
+            });
         }
         if (path.EndsWith(".url", StringComparison.OrdinalIgnoreCase))
         {
             var urlStamp = GetLastWriteStamp(path);
             var urlKey = $"url-icon:{path}:{urlStamp}";
-            return Cache.GetOrAdd(urlKey, _ => LoadInternetShortcutIcon(path) ?? LoadIcon(path));
+            return GetCachedImage(urlKey, () => LoadInternetShortcutIcon(path) ?? LoadIcon(path));
         }
         long stamp;
         try { stamp = File.GetLastWriteTimeUtc(path).Ticks; }
         catch { stamp = 0; }
         var size = Math.Clamp(requestedSize, 16, 256);
         var key = $"thumbnail:{path}:{stamp}:{size}";
-        return Cache.GetOrAdd(key, _ => LoadShellThumbnail(path, size) ?? LoadIcon(path));
+        return GetCachedImage(key, () => LoadShellThumbnail(path, size) ?? LoadIcon(path));
+    }
+
+    private static ImageSource? GetCachedImage(string key, Func<ImageSource?> factory)
+    {
+        lock (CacheGate)
+        {
+            if (Cache.TryGetValue(key, out var cached)) return cached;
+        }
+
+        var image = factory();
+        lock (CacheGate)
+        {
+            if (Cache.TryGetValue(key, out var cached)) return cached;
+            Cache[key] = image;
+            CacheOrder.Enqueue(key);
+            while (Cache.Count > MaxImageCacheEntries && CacheOrder.TryDequeue(out var oldest))
+                Cache.Remove(oldest);
+        }
+        return image;
     }
 
     public static string GetTypeName(string path, bool isDirectory)

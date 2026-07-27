@@ -6,7 +6,7 @@ namespace ZDesk.Services;
 public sealed class DesktopFileService : IDisposable
 {
     private readonly List<FileSystemWatcher> _watchers = [];
-    private readonly List<DesktopFileChange> _pendingChanges = [];
+    private readonly Dictionary<string, DesktopFileChange> _pendingChanges = new(StringComparer.OrdinalIgnoreCase);
     private readonly DispatcherTimer _refreshTimer;
     public string UserDesktop { get; } = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
     public string CommonDesktop { get; } = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
@@ -24,7 +24,7 @@ public sealed class DesktopFileService : IDisposable
             DesktopFileChange[] changes;
             lock (_pendingChanges)
             {
-                changes = _pendingChanges.ToArray();
+                changes = _pendingChanges.Values.ToArray();
                 _pendingChanges.Clear();
             }
             Changed?.Invoke(this, new DesktopFilesChangedEventArgs(changes));
@@ -94,7 +94,7 @@ public sealed class DesktopFileService : IDisposable
         var change = e is RenamedEventArgs renamed
             ? new DesktopFileChange(WatcherChangeTypes.Renamed, renamed.FullPath, renamed.OldFullPath)
             : new DesktopFileChange(e.ChangeType, e.FullPath);
-        lock (_pendingChanges) _pendingChanges.Add(change);
+        lock (_pendingChanges) _pendingChanges[change.FullPath] = change;
         _ = _refreshTimer.Dispatcher.BeginInvoke(() =>
         {
             _refreshTimer.Stop();

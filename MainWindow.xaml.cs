@@ -44,7 +44,10 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _searchTimer;
     private readonly DispatcherTimer _ruleTimer;
     private readonly DispatcherTimer _edgeTimer;
+    private readonly DispatcherTimer _shellRefreshTimer;
     private bool _rulesRunning;
+    private bool _saveRunning;
+    private bool _savePending;
     private string _displaySignature = string.Empty;
     private SettingsWindow? _settingsWindow;
     private string? _pendingDesktopMenuCreateKind;
@@ -57,7 +60,7 @@ public partial class MainWindow : Window
         _diagnosticService = new DiagnosticService(_layoutStore);
         _desktopFiles = new DesktopFileService(Dispatcher);
         _desktopFiles.Changed += DesktopFiles_Changed;
-        _shellChangeNotifications.Changed += (_, _) => Dispatcher.BeginInvoke(ReconcileDesktopGroups);
+        _shellChangeNotifications.Changed += ShellChangeNotifications_Changed;
         _explorerIconVisibility = new DesktopIconVisibilityService(Dispatcher);
 
         _saveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
@@ -68,6 +71,11 @@ public partial class MainWindow : Window
         _ruleTimer.Tick += LayoutRuleTimer_Tick;
         _edgeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
         _edgeTimer.Tick += (_, _) => UpdateEdgeVisibility();
+        _shellRefreshTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(450)
+        };
+        _shellRefreshTimer.Tick += ShellRefreshTimer_Tick;
 
         _desktopDoubleClickService = new DesktopDoubleClickService(Dispatcher);
         _desktopDoubleClickService.DesktopBlankDoubleClicked += (_, _) =>
@@ -100,7 +108,22 @@ public partial class MainWindow : Window
     private void DesktopFiles_Changed(object? sender, DesktopFilesChangedEventArgs e)
     {
         if (!_isLoaded) return;
-        ReconcileDesktopGroups(e.Changes);
+        try { ReconcileDesktopGroups(e.Changes); }
+        catch (Exception ex) { LogService.Warning("Desktop file reconciliation failed", ex); }
+    }
+
+    private void ShellChangeNotifications_Changed(object? sender, EventArgs e)
+    {
+        if (!_isLoaded) return;
+        _shellRefreshTimer.Stop();
+        _shellRefreshTimer.Start();
+    }
+
+    private void ShellRefreshTimer_Tick(object? sender, EventArgs e)
+    {
+        _shellRefreshTimer.Stop();
+        try { ReconcileDesktopGroups(); }
+        catch (Exception ex) { LogService.Warning("Shell notification reconciliation failed", ex); }
     }
 
     private void ReconcileDesktopGroups() => ReconcileDesktopGroups([]);
@@ -184,7 +207,11 @@ public partial class MainWindow : Window
         if (_state.Settings.RunRulesOnFolderChanges && _state.LayoutMatchRules.Count > 0)
         {
             var service = new LayoutAssignmentService();
-            var assigned = service.Preview(desktopItems, _state.Groups, _state.LayoutMatchRules);
+            var assignedPaths = GetAssignedDesktopPaths();
+            var assigned = service.Preview(
+                desktopItems.Where(path => !assignedPaths.Contains(path)),
+                _state.Groups,
+                _state.LayoutMatchRules);
             foreach (var (path, groupId, tabId) in assigned)
             {
                 var group = _state.Groups.FirstOrDefault(g => g.Id == groupId);
@@ -217,22 +244,14 @@ public partial class MainWindow : Window
     {
         if (tabId is null)
         {
-            if (group.PinnedPaths.Contains(path, StringComparer.OrdinalIgnoreCase)) return false;
-            group.PinnedPaths.Add(path);
-            group.ItemOrder.Add(path);
-            return true;
+            return LayoutItemStateService.AddPinnedPath(group.PinnedPaths, group.ItemOrder, path);
         }
 
         group.StoreActiveTab();
         var tab = group.Tabs.FirstOrDefault(candidate => candidate.Id == tabId);
-        if (tab is null || tab.PinnedPaths.Contains(path, StringComparer.OrdinalIgnoreCase)) return false;
-        tab.PinnedPaths.Add(path);
-        tab.ItemOrder.Add(path);
+        if (tab is null || !LayoutItemStateService.AddPinnedPath(tab.PinnedPaths, tab.ItemOrder, path)) return false;
         if (group.Tabs.ElementAtOrDefault(group.ActiveTabIndex)?.Id == tabId)
-        {
-            group.PinnedPaths.Add(path);
-            group.ItemOrder.Add(path);
-        }
+            group.ReloadActiveTab();
         return true;
     }
 
@@ -246,6 +265,8 @@ public partial class MainWindow : Window
     private async void SearchTimer_Tick(object? sender, EventArgs e)
     {
         _searchTimer.Stop();
+        try
+        {
         var query = SearchBox.Text.Trim();
         var folders = _state.Groups.Where(group => group.Kind == GroupKind.Folder && Directory.Exists(group.FolderPath))
             .Select(group => group.FolderPath!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -258,6 +279,8 @@ public partial class MainWindow : Window
         if (query != SearchBox.Text.Trim()) return;
         SearchResults.ItemsSource = results;
         SearchPopup.IsOpen = results.Length > 0;
+        }
+        catch (Exception ex) { LogService.Warning("Search failed", ex); }
     }
 
     private void SearchResults_MouseDoubleClick(object sender, MouseButtonEventArgs e)
@@ -333,6 +356,7 @@ public partial class MainWindow : Window
             CreateLayoutFromDesktopMenu(pendingCreateKind, screenPoint: pendingPoint);
         }
         _shellChangeNotifications.Start(this);
+        _ = ShellContextMenuService.WarmUpAsync(_desktopFiles.EnumerateItems());
         ConfigureRuleTimer();
         ConfigureEdgeMode();
         Opacity = 1;
@@ -1406,7 +1430,24 @@ public partial class MainWindow : Window
     private async void SaveTimer_Tick(object? sender, EventArgs e)
     {
         _saveTimer.Stop();
-        await SaveNowAsync();
+        if (_saveRunning)
+        {
+            _savePending = true;
+            return;
+        }
+
+        _saveRunning = true;
+        try { await SaveNowAsync(); }
+        catch (Exception ex) { LogService.Warning("Scheduled layout save failed", ex); }
+        finally
+        {
+            _saveRunning = false;
+            if (_savePending)
+            {
+                _savePending = false;
+                _saveTimer.Start();
+            }
+        }
     }
 
     private async Task SaveNowAsync()
@@ -1503,6 +1544,7 @@ public partial class MainWindow : Window
         _searchTimer.Stop();
         _ruleTimer.Stop();
         _edgeTimer.Stop();
+        _shellRefreshTimer.Stop();
         SystemEvents.DisplaySettingsChanged -= SystemEvents_DisplaySettingsChanged;
         _recoveryService.MarkSessionCompleted();
 

@@ -6,6 +6,7 @@ public static class LogService
 {
     private static readonly object Gate = new();
     private static string _logDirectory = AppDataPathService.LogDirectory;
+    private static DateOnly _lastPrunedDate;
 
     public static string CurrentLogFile => Path.Combine(_logDirectory, $"zdesk-{DateTime.Now:yyyyMMdd}.log");
     public static void Configure(string directory) => _logDirectory = AppDataPathService.Normalize(directory);
@@ -21,9 +22,14 @@ public static class LogService
             lock (Gate)
             {
                 Directory.CreateDirectory(_logDirectory);
-                var detail = exception is null ? string.Empty : $" | {exception.GetType().Name}: {exception.Message}";
+                var detail = exception is null ? string.Empty : $"{Environment.NewLine}{exception}";
                 File.AppendAllText(CurrentLogFile, $"{DateTimeOffset.Now:O} [{level}] {message}{detail}{Environment.NewLine}");
-                PruneOldLogs();
+                var today = DateOnly.FromDateTime(DateTime.Today);
+                if (_lastPrunedDate != today)
+                {
+                    _lastPrunedDate = today;
+                    PruneOldLogs();
+                }
             }
         }
         catch
