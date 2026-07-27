@@ -9,7 +9,7 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap uap10 desktop4 desktop5 com rescap">
   <Identity Name="ZDesk.ModernContextMenu" ProcessorArchitecture="x64"
-            Publisher="CN=ZDesk Development" Version="0.1.2.0" />
+            Publisher="CN=ZDesk Development" Version="0.1.3.0" />
   <Properties>
     <DisplayName>Z-Desk Modern Context Menu</DisplayName>
     <PublisherDisplayName>Z-Desk</PublisherDisplayName>
@@ -20,7 +20,7 @@
     <Resource Language="en-US" />
   </Resources>
   <Dependencies>
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="0.1.2.0" MaxVersionTested="10.0.26100.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="0.1.3.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />
@@ -51,4 +51,5 @@
     </Application>
   </Applications>
 </Package>
+
 
