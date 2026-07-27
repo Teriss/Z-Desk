@@ -22,7 +22,7 @@ AppState
 - `LayoutTab` 保存页签 ID、类型、文件路径顺序、视图和排序状态。
 - 多页签宿主不是额外布局；每个页签仍是独立布局实体。
 - `LayoutMatchRule.GroupId` 指向普通布局或普通页签。
-- `FileEntry` 只缓存真实路径的元数据和 Shell 图标。
+- `FileEntry` 只缓存真实路径的元数据和 Shell 图标；条目进入可视区后才启动对应的 Shell 加载任务，图标换行视图由回收式虚拟化面板限制容器数量。
 - `AppSettings.TopmostHotKeys` 保存多条置顶快捷键；旧版单快捷键在 `LayoutStore` 载入时迁移为“全部布局”绑定。
 - `LayoutMatchRule.PathContains` 与扩展名同时参与匹配；快捷方式目标由 `ShortcutTargetService` 解析。
 - `AppSettings.InteractionMode` 控制标准吸附或 QQ 式贴边隐藏，`GroupDefinition.DockEdge` 保存左、右、上停靠边。
@@ -59,7 +59,7 @@ WPF 维护布局内的选中项和焦点项。普通单击、框选、`Ctrl+A` �
 
 拖放分为三类：同一普通布局内只修改 `ItemOrder`；普通布局之间只改变布局归属，不移动真实桌面文件；映射布局拖入根据 OLE 效果调用 Shell Copy/Move。拖出使用标准 WPF OLE `IDataObject`，同时提供 `CF_HDROP` 和内部布局格式，可与 Explorer 及其他支持文件拖放的应用交互。
 
-Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `FileEntry`。只有页签切换、映射恢复等结构性变化才完整加载列表，因此文件改名不会重建布局内容或窗口尺寸。
+Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `FileEntry`。桌面目录的 Shell 通知仅注册用户桌面和公共桌面，并与 watcher 汇入同一个去抖批次；通知溢出或缺少详细路径时执行完整桌面核对。列表刷新使用批量 Reset，保留未变化条目、选择和焦点，因此文件改名不会逐项重排布局内容或窗口尺寸。
 
 布局页签拖出时先从宿主移除；释放到原宿主恢复原索引，释放到其他布局合并，释放到空白处保留为独立窗口。
 

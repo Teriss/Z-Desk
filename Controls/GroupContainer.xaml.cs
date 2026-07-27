@@ -27,7 +27,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         nameof(ViewItemHeight), typeof(double), typeof(GroupContainer), new PropertyMetadata(76.0));
     public static readonly DependencyProperty ViewIconSizeProperty = DependencyProperty.Register(
         nameof(ViewIconSize), typeof(double), typeof(GroupContainer), new PropertyMetadata(34.0));
-    private readonly ObservableCollection<FileEntry> _files = [];
+    private readonly ResettableObservableCollection<FileEntry> _files = [];
     private readonly IShellFileOperationService _shellFileOperations = new ShellFileOperationService();
     private readonly FilePreviewService _filePreviewService = new();
     private readonly DispatcherTimer _folderRefreshTimer;
@@ -264,6 +264,12 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         UpdateSortHeaders();
     }
 
+    private void FileItem_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: FileEntry entry })
+            entry.EnsureVisibleDataLoaded();
+    }
+
     private void SetViewMode(LayoutViewMode mode)
     {
         if (Definition.ViewMode == mode) return;
@@ -325,6 +331,8 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         var sortDescending = Definition.SortDescending;
         var entries = _files.ToArray();
         if (requestVersion != _sortVersion) return;
+        if (sortProperty != LayoutSortProperty.Name)
+            await Task.WhenAll(entries.Select(entry => entry.MetadataLoaded));
 
         IOrderedEnumerable<FileEntry> ordered = entries.OrderByDescending(entry => entry.IsDirectory);
         ordered = sortProperty switch
@@ -567,38 +575,25 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var desired = OrderPaths(Definition.PinnedPaths
                 .Where(path => File.Exists(path) || Directory.Exists(path)))
-            .ToArray();
+                .ToArray();
         var existing = new Dictionary<string, FileEntry>(StringComparer.OrdinalIgnoreCase);
-        for (var index = _files.Count - 1; index >= 0; index--)
+        foreach (var entry in _files)
         {
-            var entry = _files[index];
-            if (!existing.TryAdd(entry.FullPath, entry))
-            {
-                _files.RemoveAt(index);
-                entry.Dispose();
-            }
+            if (!existing.TryAdd(entry.FullPath, entry)) entry.Dispose();
         }
 
+        var desiredEntries = new List<FileEntry>(desired.Length);
         for (var targetIndex = 0; targetIndex < desired.Length; targetIndex++)
         {
             var path = desired[targetIndex];
             if (!existing.TryGetValue(path, out var entry))
-            {
                 entry = CreateEntry(path);
-                existing[path] = entry;
-            }
-
-            var currentIndex = _files.IndexOf(entry);
-            if (currentIndex < 0) _files.Insert(targetIndex, entry);
-            else if (currentIndex != targetIndex) _files.Move(currentIndex, targetIndex);
+            desiredEntries.Add(entry);
         }
 
-        while (_files.Count > desired.Length)
-        {
-            var entry = _files[^1];
-            _files.RemoveAt(_files.Count - 1);
-            entry.Dispose();
-        }
+        var desiredEntrySet = desiredEntries.ToHashSet();
+        foreach (var entry in existing.Values.Where(entry => !desiredEntrySet.Contains(entry))) entry.Dispose();
+        _files.ReplaceAll(desiredEntries);
 
         FileList.SelectedItems.Clear();
         foreach (var entry in _files.Where(entry => selected.Contains(entry.FullPath)))
@@ -620,44 +615,30 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         var desiredSet = desired.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var existing = new Dictionary<string, FileEntry>(StringComparer.OrdinalIgnoreCase);
 
-        for (var index = _files.Count - 1; index >= 0; index--)
+        foreach (var entry in _files)
         {
-            var entry = _files[index];
-            if (!desiredSet.Contains(entry.FullPath) || !existing.TryAdd(entry.FullPath, entry))
-            {
-                _files.RemoveAt(index);
-                entry.Dispose();
-            }
+            if (!desiredSet.Contains(entry.FullPath) || !existing.TryAdd(entry.FullPath, entry)) entry.Dispose();
         }
 
+        var desiredEntries = new List<FileEntry>(desired.Length);
         for (var targetIndex = 0; targetIndex < desired.Length; targetIndex++)
         {
             var path = desired[targetIndex];
-            if (!existing.TryGetValue(path, out var entry) ||
-                (changedPaths?.Contains(path) == true))
+            if (!existing.TryGetValue(path, out var entry))
             {
-                var replacement = CreateEntry(path);
-                if (entry is not null)
-                {
-                    var oldIndex = _files.IndexOf(entry);
-                    if (oldIndex >= 0) _files[oldIndex] = replacement;
-                    entry.Dispose();
-                }
-                existing[path] = replacement;
-                entry = replacement;
+                entry = CreateEntry(path);
             }
-
-            var currentIndex = _files.IndexOf(entry);
-            if (currentIndex < 0) _files.Insert(targetIndex, entry);
-            else if (currentIndex != targetIndex) _files.Move(currentIndex, targetIndex);
+            else if (changedPaths?.Contains(path) == true)
+            {
+                entry.Dispose();
+                entry = CreateEntry(path);
+            }
+            desiredEntries.Add(entry);
         }
 
-        while (_files.Count > desired.Length)
-        {
-            var entry = _files[^1];
-            _files.RemoveAt(_files.Count - 1);
-            entry.Dispose();
-        }
+        var desiredEntrySet = desiredEntries.ToHashSet();
+        foreach (var entry in existing.Values.Where(entry => !desiredEntrySet.Contains(entry))) entry.Dispose();
+        _files.ReplaceAll(desiredEntries);
     }
 
     private void DisposeFileEntries()
@@ -1460,13 +1441,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void ApplyEntryOrder(IReadOnlyList<FileEntry> ordered)
     {
-        for (var targetIndex = 0; targetIndex < ordered.Count; targetIndex++)
-        {
-            var entry = ordered[targetIndex];
-            var currentIndex = _files.IndexOf(entry);
-            if (currentIndex < 0) _files.Insert(targetIndex, entry);
-            else if (currentIndex != targetIndex) _files.Move(currentIndex, targetIndex);
-        }
+        _files.ReplaceAll(ordered);
     }
 
     private int GetDropIndex(Point position)

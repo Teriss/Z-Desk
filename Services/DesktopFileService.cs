@@ -7,6 +7,7 @@ public sealed class DesktopFileService : IDisposable
 {
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly Dictionary<string, DesktopFileChange> _pendingChanges = new(StringComparer.OrdinalIgnoreCase);
+    private bool _fullRefreshPending;
     private readonly DispatcherTimer _refreshTimer;
     public string UserDesktop { get; } = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
     public string CommonDesktop { get; } = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
@@ -22,12 +23,15 @@ public sealed class DesktopFileService : IDisposable
         {
             _refreshTimer.Stop();
             DesktopFileChange[] changes;
+            bool fullRefresh;
             lock (_pendingChanges)
             {
                 changes = _pendingChanges.Values.ToArray();
                 _pendingChanges.Clear();
+                fullRefresh = _fullRefreshPending;
+                _fullRefreshPending = false;
             }
-            Changed?.Invoke(this, new DesktopFilesChangedEventArgs(changes));
+            Changed?.Invoke(this, new DesktopFilesChangedEventArgs(changes, fullRefresh));
         };
         StartWatcher(UserDesktop);
         if (!string.Equals(UserDesktop, CommonDesktop, StringComparison.OrdinalIgnoreCase)) StartWatcher(CommonDesktop);
@@ -46,6 +50,16 @@ public sealed class DesktopFileService : IDisposable
         var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)));
         return string.Equals(parent, UserDesktop, StringComparison.OrdinalIgnoreCase) ||
                string.Equals(parent, CommonDesktop, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void RequestFullRefresh()
+    {
+        lock (_pendingChanges) _fullRefreshPending = true;
+        _ = _refreshTimer.Dispatcher.BeginInvoke(() =>
+        {
+            _refreshTimer.Stop();
+            _refreshTimer.Start();
+        });
     }
 
     public void Dispose()
@@ -104,7 +118,8 @@ public sealed class DesktopFileService : IDisposable
 }
 
 public sealed record DesktopFileChange(WatcherChangeTypes ChangeType, string FullPath, string? OldFullPath = null);
-public sealed class DesktopFilesChangedEventArgs(IReadOnlyList<DesktopFileChange> changes) : EventArgs
+public sealed class DesktopFilesChangedEventArgs(IReadOnlyList<DesktopFileChange> changes, bool requiresFullRefresh = false) : EventArgs
 {
     public IReadOnlyList<DesktopFileChange> Changes { get; } = changes;
+    public bool RequiresFullRefresh { get; } = requiresFullRefresh;
 }

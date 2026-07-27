@@ -40,6 +40,7 @@ try
     TestShellIcons(normalizedTestRoot);
     TestDesktopWindowStyle(normalizedTestRoot);
     TestIncrementalLayoutItemSync(normalizedTestRoot);
+    TestVirtualizingWrapPanel();
     Console.WriteLine("All Z-Desk smoke tests passed.");
 }
 finally
@@ -226,6 +227,77 @@ static void TestIncrementalLayoutItemSync(string root)
     thread.Start();
     thread.Join();
     if (failure is not null) throw new InvalidOperationException("Incremental layout item sync test failed.", failure);
+}
+
+static void TestVirtualizingWrapPanel()
+{
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try { TestVirtualizingWrapPanelCore(); }
+        catch (Exception ex) { failure = ex; }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    if (failure is not null) throw new InvalidOperationException("Virtualizing wrap panel test failed.", failure);
+}
+
+static void TestVirtualizingWrapPanelCore()
+{
+    var panelFactory = new System.Windows.FrameworkElementFactory(typeof(VirtualizingWrapPanel));
+    panelFactory.SetValue(VirtualizingWrapPanel.ItemWidthProperty, 80d);
+    panelFactory.SetValue(VirtualizingWrapPanel.ItemHeightProperty, 32d);
+    var list = new System.Windows.Controls.ListBox
+    {
+        Width = 320,
+        Height = 160,
+        ItemsPanel = new System.Windows.Controls.ItemsPanelTemplate(panelFactory),
+        ItemsSource = Enumerable.Range(0, 500).ToArray()
+    };
+    var window = new System.Windows.Window
+    {
+        Content = list,
+        Width = 320,
+        Height = 160,
+        ShowInTaskbar = false,
+        WindowStyle = System.Windows.WindowStyle.None,
+        Opacity = 0
+    };
+    window.Show();
+    PumpDispatcher(TimeSpan.FromMilliseconds(120));
+    var panel = FindVisualChild<VirtualizingWrapPanel>(list);
+    Assert(panel is not null, "virtualizing wrap panel is created");
+    var realized = Enumerable.Range(0, 500)
+        .Count(index => list.ItemContainerGenerator.ContainerFromIndex(index) is not null);
+    Assert(realized < 500 && realized > 0, "virtualizing wrap panel limits realized containers");
+    panel!.SetVerticalOffset(10_000);
+    PumpDispatcher(TimeSpan.FromMilliseconds(80));
+    Assert(list.ItemContainerGenerator.ContainerFromIndex(499) is not null,
+        "virtualizing wrap panel realizes the last item after scrolling");
+    window.Close();
+
+    var collection = new ResettableObservableCollection<int> { 1, 2, 3 };
+    var resets = 0;
+    collection.CollectionChanged += (_, args) =>
+    {
+        if (args.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset) resets++;
+    };
+    collection.ReplaceAll([3, 2, 1]);
+    Assert(resets == 1, "batch collection emits one reset notification");
+
+    using var desktopFiles = new DesktopFileService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+    var refreshes = 0;
+    var fullRefresh = false;
+    desktopFiles.Changed += (_, args) =>
+    {
+        refreshes++;
+        fullRefresh |= args.RequiresFullRefresh;
+    };
+    desktopFiles.RequestFullRefresh();
+    desktopFiles.RequestFullRefresh();
+    PumpDispatcher(TimeSpan.FromMilliseconds(560));
+    Assert(refreshes == 1 && fullRefresh, "desktop refresh requests are coalesced");
 }
 
 static void TestLayoutRuleNotifications()

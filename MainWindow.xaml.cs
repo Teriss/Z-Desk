@@ -44,7 +44,6 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _searchTimer;
     private readonly DispatcherTimer _ruleTimer;
     private readonly DispatcherTimer _edgeTimer;
-    private readonly DispatcherTimer _shellRefreshTimer;
     private bool _rulesRunning;
     private bool _saveRunning;
     private bool _savePending;
@@ -71,12 +70,6 @@ public partial class MainWindow : Window
         _ruleTimer.Tick += LayoutRuleTimer_Tick;
         _edgeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
         _edgeTimer.Tick += (_, _) => UpdateEdgeVisibility();
-        _shellRefreshTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
-        {
-            Interval = TimeSpan.FromMilliseconds(450)
-        };
-        _shellRefreshTimer.Tick += ShellRefreshTimer_Tick;
-
         _desktopDoubleClickService = new DesktopDoubleClickService(Dispatcher);
         _desktopDoubleClickService.DesktopBlankDoubleClicked += (_, _) =>
         {
@@ -108,30 +101,23 @@ public partial class MainWindow : Window
     private void DesktopFiles_Changed(object? sender, DesktopFilesChangedEventArgs e)
     {
         if (!_isLoaded) return;
-        try { ReconcileDesktopGroups(e.Changes); }
+        try { ReconcileDesktopGroups(e.Changes, e.RequiresFullRefresh); }
         catch (Exception ex) { LogService.Warning("Desktop file reconciliation failed", ex); }
     }
 
     private void ShellChangeNotifications_Changed(object? sender, EventArgs e)
     {
         if (!_isLoaded) return;
-        _shellRefreshTimer.Stop();
-        _shellRefreshTimer.Start();
+        _desktopFiles.RequestFullRefresh();
     }
 
-    private void ShellRefreshTimer_Tick(object? sender, EventArgs e)
-    {
-        _shellRefreshTimer.Stop();
-        try { ReconcileDesktopGroups(); }
-        catch (Exception ex) { LogService.Warning("Shell notification reconciliation failed", ex); }
-    }
+    private void ReconcileDesktopGroups() => ReconcileDesktopGroups([], fullRefresh: true);
 
-    private void ReconcileDesktopGroups() => ReconcileDesktopGroups([]);
-
-    private void ReconcileDesktopGroups(IReadOnlyList<DesktopFileChange> changes)
+    private void ReconcileDesktopGroups(IReadOnlyList<DesktopFileChange> changes, bool fullRefresh = false)
     {
         if (!_isLoaded) return;
-        LogService.Info($"Desktop reconciliation | changes={string.Join(",", changes.Select(change => $"{change.ChangeType}:{Path.GetFileName(change.FullPath)}"))}");
+        if (changes.Count > 0 || fullRefresh)
+            LogService.Info($"Desktop reconciliation | full={fullRefresh} | changes={string.Join(",", changes.Select(change => $"{change.ChangeType}:{Path.GetFileName(change.FullPath)}"))}");
         var changed = false;
         var affectedGroups = new HashSet<Guid>();
         foreach (var rename in changes.Where(change => change.ChangeType == WatcherChangeTypes.Renamed && change.OldFullPath is not null))
@@ -167,7 +153,7 @@ public partial class MainWindow : Window
         }
 
         var desktopItems = _desktopFiles.EnumerateItems().ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var hasExplicitDeletion = changes.Any(change => change.ChangeType == WatcherChangeTypes.Deleted);
+        var hasExplicitDeletion = fullRefresh || changes.Any(change => change.ChangeType == WatcherChangeTypes.Deleted);
         if (hasExplicitDeletion)
         {
             foreach (var group in _state.Groups)
@@ -355,7 +341,7 @@ public partial class MainWindow : Window
             _pendingDesktopMenuPoint = null;
             CreateLayoutFromDesktopMenu(pendingCreateKind, screenPoint: pendingPoint);
         }
-        _shellChangeNotifications.Start(this);
+        _shellChangeNotifications.Start(this, [_desktopFiles.UserDesktop, _desktopFiles.CommonDesktop]);
         _ = ShellContextMenuService.WarmUpAsync(_desktopFiles.EnumerateItems());
         ConfigureRuleTimer();
         ConfigureEdgeMode();
@@ -1544,7 +1530,6 @@ public partial class MainWindow : Window
         _searchTimer.Stop();
         _ruleTimer.Stop();
         _edgeTimer.Stop();
-        _shellRefreshTimer.Stop();
         SystemEvents.DisplaySettingsChanged -= SystemEvents_DisplaySettingsChanged;
         _recoveryService.MarkSessionCompleted();
 

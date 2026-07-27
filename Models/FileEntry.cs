@@ -18,7 +18,8 @@ public sealed class FileEntry : INotifyPropertyChanged
     private DateTime _modifiedTime;
     private long? _sizeBytes;
     private readonly CancellationTokenSource _lifetime = new();
-    private readonly Task _metadataLoadTask;
+    private Task? _metadataLoadTask;
+    private Task? _iconLoadTask;
 
     public string Name { get; }
     public string FullPath { get; }
@@ -28,7 +29,7 @@ public sealed class FileEntry : INotifyPropertyChanged
     public string ModifiedText { get => _modifiedText; private set { if (_modifiedText == value) return; _modifiedText = value; OnPropertyChanged(); OnPropertyChanged(nameof(DetailSummary)); } }
     public DateTime ModifiedTime { get => _modifiedTime; private set { if (_modifiedTime == value) return; _modifiedTime = value; OnPropertyChanged(); } }
     public long? SizeBytes { get => _sizeBytes; private set { if (_sizeBytes == value) return; _sizeBytes = value; OnPropertyChanged(); } }
-    public Task MetadataLoaded => _metadataLoadTask;
+    public Task MetadataLoaded => EnsureMetadataLoaded();
     public string DetailSummary => string.Join("  |  ", new[] { TypeName, SizeText, ModifiedText }.Where(value => !string.IsNullOrWhiteSpace(value)));
     public ImageSource? IconSource
     {
@@ -48,14 +49,28 @@ public sealed class FileEntry : INotifyPropertyChanged
         Name = GetDisplayName(fullPath, name);
         FullPath = fullPath;
         IsDirectory = isDirectory;
-        // Queue icon extraction behind the first layout pass. A folder with
-        // hundreds of entries should render names immediately while shell icon
-        // work is throttled in the background.
-        if (Application.Current?.Dispatcher is { } dispatcher)
-            dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() => _ = LoadIconAsync()));
-        else
-            _ = LoadIconAsync();
-        _metadataLoadTask = LoadMetadataAsync();
+    }
+
+    public void EnsureVisibleDataLoaded()
+    {
+        _ = EnsureIconLoaded();
+        _ = EnsureMetadataLoaded();
+    }
+
+    private Task EnsureIconLoaded()
+    {
+        var task = Volatile.Read(ref _iconLoadTask);
+        if (task is not null) return task;
+        var created = StartIconLoadAsync();
+        return Interlocked.CompareExchange(ref _iconLoadTask, created, null) ?? created;
+    }
+
+    private Task EnsureMetadataLoaded()
+    {
+        var task = Volatile.Read(ref _metadataLoadTask);
+        if (task is not null) return task;
+        var created = LoadMetadataAsync();
+        return Interlocked.CompareExchange(ref _metadataLoadTask, created, null) ?? created;
     }
 
     /// <summary>Returns the Explorer-style label while keeping the real path unchanged.</summary>
@@ -140,7 +155,7 @@ public sealed class FileEntry : INotifyPropertyChanged
         return unit == 0 ? $"{bytes} B" : $"{value:0.#} {units[unit]}";
     }
 
-    private async Task LoadIconAsync()
+    private async Task StartIconLoadAsync()
     {
         try
         {
