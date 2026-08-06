@@ -14,9 +14,11 @@ namespace ZDesk;
 
 public partial class MainWindow : Window
 {
+    private const int QrRecognitionHotKeyBindingId = int.MinValue + 1;
     private readonly RecoveryService _recoveryService;
     private readonly LayoutStore _layoutStore = new();
     private readonly GlobalHotKeyService _hotKeyService = new();
+    private readonly QrRecognitionFrameController _qrFrameController;
     private readonly DispatcherTimer _saveTimer;
     private readonly DesktopDoubleClickService _desktopDoubleClickService;
     private readonly TrayIconService _trayIconService;
@@ -36,6 +38,8 @@ public partial class MainWindow : Window
     private bool _isTopmost;
     private readonly HashSet<Guid> _activeHotKeyBindings = [];
     private readonly Dictionary<int, Guid> _hotKeyBindingKeys = [];
+    private QrRecognitionResultsWindow? _qrResultsWindow;
+    private bool _qrRecognitionRunning;
     private bool _temporarilyRevealed;
     private bool _topmostFromHotKey;
     private bool _shutdownInProgress;
@@ -55,6 +59,15 @@ public partial class MainWindow : Window
     public MainWindow(RecoveryService recoveryService)
     {
         InitializeComponent();
+        _qrFrameController = new QrRecognitionFrameController(
+            this,
+            () => _state.Settings.QrRecognitionFrameBounds,
+            bounds =>
+            {
+                _state.Settings.QrRecognitionFrameBounds = bounds;
+                if (_isLoaded) ScheduleSave();
+            });
+        _qrFrameController.RecognitionRequested += QrFrame_RecognitionRequested;
         _recoveryService = recoveryService;
         _diagnosticService = new DiagnosticService(_layoutStore);
         _desktopFiles = new DesktopFileService(Dispatcher);
@@ -299,6 +312,7 @@ public partial class MainWindow : Window
             {
                 window.EnsureVisibleOnCurrentDisplays();
             }
+            _qrFrameController.RefreshDisplayLayout();
             _desktopSurface?.EnsureVisibleBounds();
 
             StatusText.Text = "显示器配置已变化，桌面分组位置已重新校验";
@@ -803,23 +817,36 @@ public partial class MainWindow : Window
     {
         error = string.Empty;
         _hotKeyBindingKeys.Clear();
-        if (settings.InteractionMode != LayoutInteractionMode.Standard)
-            return _hotKeyService.ReplaceAll([], out error);
         var registrations = new List<(int BindingId, HotKeyGesture Gesture)>();
-        foreach (var binding in settings.TopmostHotKeys.Where(binding => binding.Enabled))
+        if (!string.IsNullOrWhiteSpace(settings.QrRecognitionHotKey))
         {
-            if (!HotKeyParser.TryParse(binding.Gesture, out var gesture, out error) || gesture is null)
+            if (!HotKeyParser.TryParse(settings.QrRecognitionHotKey, out var gesture, out error) || gesture is null)
                 return false;
-            var key = binding.Id.GetHashCode();
-            while (_hotKeyBindingKeys.ContainsKey(key)) key++;
-            _hotKeyBindingKeys[key] = binding.Id;
-            registrations.Add((key, gesture));
+            registrations.Add((QrRecognitionHotKeyBindingId, gesture));
+        }
+
+        if (settings.InteractionMode == LayoutInteractionMode.Standard)
+        {
+            foreach (var binding in settings.TopmostHotKeys.Where(binding => binding.Enabled))
+            {
+                if (!HotKeyParser.TryParse(binding.Gesture, out var gesture, out error) || gesture is null)
+                    return false;
+                var key = binding.Id.GetHashCode();
+                while (key == QrRecognitionHotKeyBindingId || _hotKeyBindingKeys.ContainsKey(key)) key++;
+                _hotKeyBindingKeys[key] = binding.Id;
+                registrations.Add((key, gesture));
+            }
         }
         return _hotKeyService.ReplaceAll(registrations, out error);
     }
 
     private void HotKeyBindingPressed(int key)
     {
+        if (key == QrRecognitionHotKeyBindingId)
+        {
+            StartQrRecognition();
+            return;
+        }
         if (_state.Settings.InteractionMode != LayoutInteractionMode.Standard) return;
         if (!_hotKeyBindingKeys.TryGetValue(key, out var bindingId)) return;
         var binding = _state.Settings.TopmostHotKeys.FirstOrDefault(item => item.Id == bindingId);
@@ -827,6 +854,54 @@ public partial class MainWindow : Window
         if (!_activeHotKeyBindings.Add(bindingId)) _activeHotKeyBindings.Remove(bindingId);
         _topmostFromHotKey = _activeHotKeyBindings.Count > 0;
         ApplyActiveTopmostState();
+    }
+
+    private void StartQrRecognition()
+    {
+        if (!_isLoaded || _qrRecognitionRunning) return;
+        _qrFrameController.Show();
+        StatusText.Text = "二维码取景框已打开，可移动或缩放后点击识别";
+    }
+
+    private async void QrFrame_RecognitionRequested(System.Drawing.Rectangle bounds)
+    {
+        if (!_isLoaded || _qrRecognitionRunning) return;
+        _qrRecognitionRunning = true;
+        try
+        {
+            if (_qrResultsWindow is not null)
+            {
+                _qrResultsWindow.Hide();
+                _qrResultsWindow.Close();
+                _qrResultsWindow = null;
+            }
+
+            var capture = await Task.Run(() => ScreenCaptureService.CaptureRegion(bounds));
+            if (capture is null)
+            {
+                _qrFrameController.RestoreAfterFailure();
+                StatusText.Text = "未检测到可用显示器";
+                return;
+            }
+
+            var captured = capture!;
+            var results = await Task.Run(() => QrCodeRecognitionService.Decode(captured));
+            _qrResultsWindow = new QrRecognitionResultsWindow(results);
+            _qrResultsWindow.Closed += (_, _) => _qrResultsWindow = null;
+            _qrResultsWindow.Show();
+            _qrResultsWindow.Activate();
+            StatusText.Text = results.Count == 0 ? "选区内未识别到二维码" : $"已识别 {results.Count} 个二维码";
+        }
+        catch (Exception ex)
+        {
+            LogService.Warning("QR code recognition failed", ex);
+            _qrFrameController.RestoreAfterFailure();
+            StatusText.Text = "二维码识别失败，请重试";
+        }
+        finally
+        {
+            _qrRecognitionRunning = false;
+        }
     }
 
     private void ApplyActiveTopmostState()
@@ -1037,6 +1112,7 @@ public partial class MainWindow : Window
                 AllLayouts = binding.AllLayouts,
                 LayoutIds = [.. binding.LayoutIds]
             }).ToList();
+            requested.QrRecognitionHotKey = previousSettings.QrRecognitionHotKey;
             TryRegisterConfiguredHotKeys(previousSettings, out _);
         }
         _activeHotKeyBindings.Clear();
@@ -1054,6 +1130,7 @@ public partial class MainWindow : Window
         requested.GroupsHidden = _groupsHidden;
         requested.IsTopmost = false;
         requested.WasInDesktopMode = _desktopMode;
+        requested.QrRecognitionFrameBounds = _state.Settings.QrRecognitionFrameBounds ?? requested.QrRecognitionFrameBounds;
         _state.Settings = requested;
         SynchronizeDesktopGroups(groups);
         _state.Rules = rules;
@@ -1519,6 +1596,9 @@ public partial class MainWindow : Window
         _explorerIconVisibility.Restore();
         _desktopSurface?.Close();
         _desktopSurface = null;
+        _qrFrameController.Dispose();
+        _qrResultsWindow?.Close();
+        _qrResultsWindow = null;
         _desktopFiles.Dispose();
         _desktopFiles.Changed -= DesktopFiles_Changed;
         _shellChangeNotifications.Dispose();

@@ -8,6 +8,7 @@ Windows 桌面布局管理器。布局窗口位于 Explorer 桌面层，文件�
 - 拖动、缩放、跨显示器、边缘吸附、重叠布局按交互置前。
 - 标准吸附与 QQ 式贴边隐藏、双击桌面空白隐藏。
 - 可配置多条全局快捷键，分别置顶指定布局或全部布局。
+- 可录制全局快捷键，打开可移动、可缩放的二维码取景框，在本地识别框内全部二维码。
 - Shell 原生右键菜单、重命名、属性、回收站删除、复制/移动、拖放和 QuickLook。
 - 多选、框选、`Ctrl+A`、视图模式、排序和规则自动归类。
 - 首次启动创建默认组合布局及九个分类页签（含游戏）。
@@ -25,6 +26,7 @@ Windows 桌面布局管理器。布局窗口位于 Explorer 桌面层，文件�
 | 桌面层 | Win32 WorkerW、窗口 Z 序、Per-Monitor V2 DPI |
 | 文件交互 | Windows Shell `IFileOperation`、`IContextMenu2/3`、OLE/CF_HDROP、Shell 图标、FileSystemWatcher |
 | 系统集成 | 全局热键、低级鼠标钩子、托盘、Explorer 图标 watchdog |
+| 二维码识别 | ZXingCpp、本地 GDI 选区捕获、可复用取景框 |
 | Win11 桌面菜单 | C++ `IExplorerCommand` + MSIX/COM |
 | 发布目标 | `win-x64` 自包含 |
 
@@ -70,14 +72,17 @@ dotnet run --project ZDesk.csproj
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License](LICENSE). Third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## 数据
 
 默认数据目录 `%LocalAppData%\ZDesk`，日志目录 `%LocalAppData%\ZDesk\logs`。设置中可修改，迁移采用复制并保留源目录备份。状态文件为 `layout.json`，保存前生成 `layout.backup.json`。
 
+二维码识别的屏幕图像和结果只在当前识别期间保留在内存中，不会保存到数据目录或日志。
+
 ## 质量边界
 
-自动测试覆盖 Shell 重命名/复制/移动、预览 Provider、选择隔离、500 条规则页性能、规则通知、持久化、页签、窗口层级、停靠模式、首次初始化、存储迁移和设置同步。Explorer 图标恢复、QuickLook 实际安装、回收站取消、跨应用拖放、多显示器 DPI、Win+D 和扩展菜单仍需在目标 Windows 版本人工验收。
+自动测试覆盖 Shell 重命名/复制/移动、预览 Provider、选择隔离、二维码识别与取景框几何、500 条规则页性能、规则通知、持久化、页签、窗口层级、停靠模式、首次初始化、存储迁移和设置同步。Explorer 图标恢复、QuickLook 实际安装、回收站取消、跨应用拖放、取景框穿透与缩放、多显示器 DPI、Win+D 和扩展菜单仍需在目标 Windows 版本人工验收。
 
 Issue 和 PR 模板位于 `.github/`；提交问题请附 Windows 版本、复现步骤、版本类型和相关日志。
+二维码识别采用可移动、可缩放的单窗口取景框。快捷键只显示 VS Code 风格暗色标题栏和连续边框，不冻结或捕获桌面；标题栏可拖动整个取景框，四边和四角用于缩放，并显示框内物理像素尺寸。点击“识别”或按 Enter 后才读取框内区域；点击关闭按钮或按 Esc 隐藏取景框。取景框支持跨显示器和混合 DPI，位置与大小会自动保存。窗口不设置屏幕捕获排除属性，因此可在 Windows 远程桌面及第三方远程软件中看到；识别前会先隐藏窗口。

@@ -2,6 +2,7 @@ using ZDesk.Controls;
 using ZDesk.Models;
 using ZDesk.Services;
 using ZDesk.Windows;
+using ZXingCpp;
 
 var testRoot = Path.Combine(Path.GetTempPath(), $"ZDesk-smoke-{Guid.NewGuid():N}");
 var normalizedTemp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
@@ -20,6 +21,10 @@ try
     TestDesktopSelectionBoundary(normalizedTestRoot);
     TestLayoutRuleNotifications();
     TestHotKeyParser();
+    TestQrCodeRecognition();
+    TestQrSelectionGeometry();
+    TestQrSelectionInteractionState();
+    TestQrRecognitionFrameGeometry();
     TestEdgeDockGeometry();
     await TestRulesAsync(normalizedTestRoot);
     await TestLayoutPathMatchingAsync(normalizedTestRoot);
@@ -349,6 +354,242 @@ static void TestHotKeyParser()
     Assert(!HotKeyParser.TryParse("Ctrl+Alt+T+Y", out _, out _), "multi-key hotkey rejected");
 }
 
+static void TestQrCodeRecognition()
+{
+    var single = CreateQrFrame("https://example.test/one", 180);
+    Assert(QrCodeRecognitionService.Decode(single).Single().Text == "https://example.test/one", "single QR recognition");
+
+    var first = CreateQrFrame("first QR", 180);
+    var second = CreateQrFrame("second QR", 180);
+    var canvas = CreateSolidFrame(first.Width + second.Width + 60, Math.Max(first.Height, second.Height) + 40, 255);
+    CopyFrame(first, canvas, 20, 20);
+    CopyFrame(second, canvas, first.Width + 40, 20);
+    var multiple = QrCodeRecognitionService.Decode(canvas);
+    Assert(multiple.Select(result => result.Text).SequenceEqual(["first QR", "second QR"]), "multiple QR recognition and ordering");
+
+    var duplicateFirst = CreateQrFrame("duplicate QR", 180);
+    var duplicateSecond = CreateQrFrame("duplicate QR", 180);
+    var duplicateCanvas = CreateSolidFrame(
+        duplicateFirst.Width + duplicateSecond.Width + 60,
+        Math.Max(duplicateFirst.Height, duplicateSecond.Height) + 40,
+        255);
+    CopyFrame(duplicateFirst, duplicateCanvas, 20, 20);
+    CopyFrame(duplicateSecond, duplicateCanvas, duplicateFirst.Width + 40, 20);
+    Assert(QrCodeRecognitionService.Decode(duplicateCanvas).Count(result => result.Text == "duplicate QR") == 2,
+        "separate QR codes with the same text are retained");
+
+    var rotated = Rotate90(single);
+    Assert(QrCodeRecognitionService.Decode(rotated).Single().Text == "https://example.test/one", "rotated QR recognition");
+
+    var inverted = Invert(single);
+    Assert(QrCodeRecognitionService.Decode(inverted).Single().Text == "https://example.test/one", "inverted QR recognition");
+
+    var stylized = CreateStylizedQrFrame("styled QR", 360);
+    Assert(QrCodeRecognitionService.Decode(stylized).Single().Text == "styled QR",
+        "gradient rounded-module QR with a centered logo mask is recognized");
+
+    Assert(QrCodeRecognitionService.Decode(CreateSolidFrame(180, 180, 255)).Count == 0, "empty QR recognition result");
+}
+
+static void TestQrSelectionGeometry()
+{
+    var desktop = CreateSolidFrame(20, 10, 255, new System.Drawing.Rectangle(-10, 0, 20, 10));
+    for (var row = 0; row < desktop.Height; row++)
+    {
+        for (var column = 0; column < 10; column++)
+        {
+            Array.Fill(desktop.Pixels, (byte)20, row * desktop.Stride + column * 4, 4);
+            Array.Fill(desktop.Pixels, (byte)220, row * desktop.Stride + (column + 10) * 4, 4);
+        }
+    }
+    var selection = QrSelectionGeometry.Normalize(new System.Drawing.Point(-5, 0), new System.Drawing.Point(5, 10));
+    Assert(QrSelectionGeometry.IsValid(selection), "cross-screen QR selection is valid");
+    var composed = QrSelectionGeometry.ComposeSelection(desktop, selection);
+    Assert(composed.Bounds == new System.Drawing.Rectangle(-5, 0, 10, 10), "cross-screen selection preserves physical coordinates");
+    Assert(composed.Pixels[0] == 20 && composed.Pixels[5 * 4] == 220, "cross-screen selection composes display pixels");
+    Assert(!QrSelectionGeometry.IsValid(new System.Drawing.Rectangle(0, 0, 7, 8)), "tiny QR selection rejected");
+}
+
+static void TestQrSelectionInteractionState()
+{
+    var interaction = new QrSelectionInteractionState();
+    Assert(interaction.Mode == QrSelectionInteractionMode.Idle, "QR selection starts idle");
+    Assert(interaction.BeginExit() && interaction.IsExiting, "idle right-click starts QR capture exit");
+    Assert(interaction.CompleteExit() && interaction.Mode == QrSelectionInteractionMode.Idle,
+        "right-button release completes QR capture exit");
+
+    Assert(interaction.Begin(new System.Drawing.Point(10, 10)), "left-button starts QR selection");
+    Assert(interaction.IsDragging && interaction.CurrentSelection(new System.Drawing.Point(20, 30)) ==
+        new System.Drawing.Rectangle(10, 10, 10, 20), "QR selection tracks left-drag geometry");
+    Assert(interaction.BeginExit() && interaction.IsExiting,
+        "right-click during QR selection starts complete capture exit");
+    Assert(interaction.CompleteExit() && interaction.Mode == QrSelectionInteractionMode.Idle,
+        "right-button release exits after cancelling QR selection");
+
+    Assert(interaction.Begin(new System.Drawing.Point(0, 0)), "selection restarts after cancelled exit");
+    Assert(interaction.Complete(new System.Drawing.Point(7, 8)) is null && !interaction.IsDragging,
+        "tiny QR selection clears without leaving capture mode");
+
+    Assert(interaction.Begin(new System.Drawing.Point(20, 20)), "valid selection starts");
+    var complete = interaction.Complete(new System.Drawing.Point(40, 50));
+    Assert(complete == new System.Drawing.Rectangle(20, 20, 20, 30), "valid QR selection completes on left release");
+
+    Assert(interaction.Begin(new System.Drawing.Point(5, 5)), "capture-loss selection starts");
+    interaction.Reset();
+    Assert(!interaction.IsDragging, "lost QR pointer capture resets interaction state");
+}
+
+static void TestQrRecognitionFrameGeometry()
+{
+    var displays = new[]
+    {
+        new System.Drawing.Rectangle(-1920, 0, 1920, 1080),
+        new System.Drawing.Rectangle(0, 0, 2560, 1440)
+    };
+    var frame = QrRecognitionFrameGeometry.CreateDefault(new System.Drawing.Point(400, 400), displays);
+    Assert(frame.Width == 720 && frame.Height == 480, "QR frame default size");
+    var resized = QrRecognitionFrameGeometry.Resize(frame, -1000, -1000, ResizeHandle.Top | ResizeHandle.Left);
+    Assert(resized.Width >= QrRecognitionFrameGeometry.MinimumWidthDip && resized.Height >= QrRecognitionFrameGeometry.MinimumHeightDip, "QR frame minimum size");
+    var scaledMinimum = QrRecognitionFrameGeometry.Resize(frame, -1000, -1000, ResizeHandle.Top | ResizeHandle.Left, 360, 240);
+    Assert(scaledMinimum.Width >= 360 && scaledMinimum.Height >= 240, "QR frame DPI-scaled minimum size");
+    var moved = QrRecognitionFrameGeometry.ClampToWorkArea(new System.Drawing.Rectangle(5000, 5000, 720, 480), displays, new System.Drawing.Point(100, 100));
+    Assert(displays.Any(display => display.IntersectsWith(moved)), "QR frame clamps to visible display");
+    var layoutHeader = QrRecognitionFrameGeometry.HeaderHeightPixels(1.25);
+    var outerLayout = QrRecognitionFrameGeometry.CalculateLayout(
+        new System.Drawing.Rectangle(100, 1200, 720, 200),
+        [new System.Drawing.Rectangle(0, 0, 1920, 1440)],
+        new System.Drawing.Point(200, 1200), layoutHeader);
+    Assert(outerLayout.WindowBounds.Top == outerLayout.CaptureBounds.Top - layoutHeader,
+        "QR frame title bar sits above the capture region");
+    Assert(outerLayout.WindowBounds.Height == outerLayout.CaptureBounds.Height + layoutHeader,
+        "QR frame outer height includes title bar");
+
+    var movedAcrossDisplays = QrRecognitionFrameGeometry.Move(frame, -2500, 80);
+    Assert(movedAcrossDisplays.Left == frame.Left - 2500 && movedAcrossDisplays.Top == frame.Top + 80,
+        "QR frame drag remains in physical coordinates across displays");
+    var staggered = new[]
+    {
+        new System.Drawing.Rectangle(-1600, 120, 1600, 900),
+        new System.Drawing.Rectangle(0, 0, 1920, 1080)
+    };
+    var spanning = new System.Drawing.Rectangle(-300, 700, 900, 300);
+    var layout = QrRecognitionFrameGeometry.CalculateLayout(spanning, staggered, new System.Drawing.Point(20, 800), 42);
+    Assert(layout.TargetWorkArea == staggered[1], "QR frame selects display with largest intersection");
+    Assert(layout.WindowBounds.Top == layout.CaptureBounds.Top - 42, "QR frame outer bounds preserve header offset");
+}
+
+static QrCaptureFrame CreateQrFrame(string text, int size)
+{
+    using var creator = new BarcodeCreator(BarcodeFormat.QRCode)
+    {
+        Options = "EcLevel=H"
+    };
+    using var barcode = creator.From(text);
+    using var image = barcode.ToImage(new WriterOptions { Scale = -size, AddQuietZones = true });
+    var monochrome = image.ToArray();
+    var pixels = new byte[image.Width * image.Height * 4];
+    for (var index = 0; index < monochrome.Length; index++)
+    {
+        var destination = index * 4;
+        pixels[destination] = monochrome[index];
+        pixels[destination + 1] = monochrome[index];
+        pixels[destination + 2] = monochrome[index];
+        pixels[destination + 3] = 255;
+    }
+    return new QrCaptureFrame(new System.Drawing.Rectangle(0, 0, image.Width, image.Height), pixels, image.Width * 4);
+}
+
+static QrCaptureFrame CreateStylizedQrFrame(string text, int size)
+{
+    var source = CreateQrFrame(text, size);
+    var pixels = source.Pixels.ToArray();
+    for (var y = 0; y < source.Height; y++)
+    {
+        for (var x = 0; x < source.Width; x++)
+        {
+            var index = y * source.Stride + x * 4;
+            var dark = source.Pixels[index] < 128;
+            var edge = dark && (x == 0 || y == 0 || x == source.Width - 1 || y == source.Height - 1 ||
+                source.Pixels[y * source.Stride + Math.Max(0, x - 1) * 4] >= 128 ||
+                source.Pixels[y * source.Stride + Math.Min(source.Width - 1, x + 1) * 4] >= 128 ||
+                source.Pixels[Math.Max(0, y - 1) * source.Stride + x * 4] >= 128 ||
+                source.Pixels[Math.Min(source.Height - 1, y + 1) * source.Stride + x * 4] >= 128);
+            if (dark && !edge)
+            {
+                pixels[index] = (byte)(40 + x * 45 / source.Width);
+                pixels[index + 1] = (byte)(20 + y * 35 / source.Height);
+                pixels[index + 2] = (byte)(80 + (x + y) * 50 / (source.Width + source.Height));
+            }
+            else
+            {
+                var background = (byte)(230 + (x + y) * 25 / (source.Width + source.Height));
+                pixels[index] = background;
+                pixels[index + 1] = background;
+                pixels[index + 2] = background;
+            }
+        }
+    }
+
+    var logoSize = Math.Max(16, source.Width / 10);
+    var logoLeft = (source.Width - logoSize) / 2;
+    var logoTop = (source.Height - logoSize) / 2;
+    for (var y = logoTop; y < logoTop + logoSize; y++)
+    {
+        for (var x = logoLeft; x < logoLeft + logoSize; x++)
+        {
+            var index = y * source.Stride + x * 4;
+            pixels[index] = 245;
+            pixels[index + 1] = 245;
+            pixels[index + 2] = 245;
+        }
+    }
+    return new QrCaptureFrame(source.Bounds, pixels, source.Stride);
+}
+
+static QrCaptureFrame CreateSolidFrame(int width, int height, byte value, System.Drawing.Rectangle? bounds = null)
+{
+    var pixels = new byte[width * height * 4];
+    Array.Fill(pixels, value);
+    return new QrCaptureFrame(bounds ?? new System.Drawing.Rectangle(0, 0, width, height), pixels, width * 4);
+}
+
+static void CopyFrame(QrCaptureFrame source, QrCaptureFrame destination, int x, int y)
+{
+    for (var row = 0; row < source.Height; row++)
+    {
+        Buffer.BlockCopy(source.Pixels, row * source.Stride, destination.Pixels,
+            (y + row) * destination.Stride + x * 4, source.Width * 4);
+    }
+}
+
+static QrCaptureFrame Rotate90(QrCaptureFrame source)
+{
+    var rotated = CreateSolidFrame(source.Height, source.Width, 255);
+    for (var y = 0; y < source.Height; y++)
+    {
+        for (var x = 0; x < source.Width; x++)
+        {
+            var destinationX = source.Height - 1 - y;
+            var destinationY = x;
+            Buffer.BlockCopy(source.Pixels, y * source.Stride + x * 4, rotated.Pixels,
+                destinationY * rotated.Stride + destinationX * 4, 4);
+        }
+    }
+    return rotated;
+}
+
+static QrCaptureFrame Invert(QrCaptureFrame source)
+{
+    var pixels = source.Pixels.ToArray();
+    for (var index = 0; index < pixels.Length; index += 4)
+    {
+        pixels[index] = (byte)(255 - pixels[index]);
+        pixels[index + 1] = (byte)(255 - pixels[index + 1]);
+        pixels[index + 2] = (byte)(255 - pixels[index + 2]);
+    }
+    return new QrCaptureFrame(source.Bounds, pixels, source.Stride);
+}
+
 static void TestEdgeDockGeometry()
 {
     var primary = new System.Drawing.Rectangle(0, 0, 1920, 1040);
@@ -551,6 +792,8 @@ static async Task TestHotKeyAndDockPersistenceAsync(string root)
         Settings = new AppSettings
         {
             InteractionMode = LayoutInteractionMode.EdgeHide,
+            QrRecognitionHotKey = "Ctrl+Shift+Q",
+            QrRecognitionFrameBounds = new QrRecognitionFrameBounds(-800, 120, 720, 480),
             TopmostHotKeys = [new TopmostHotKeyBinding { Gesture = "Ctrl+Alt+P", LayoutIds = [tab.Id] }]
         },
         Groups = [group]
@@ -559,6 +802,8 @@ static async Task TestHotKeyAndDockPersistenceAsync(string root)
     await store.SaveAsync(state);
     var loaded = await store.LoadAsync();
     Assert(loaded.Settings.InteractionMode == LayoutInteractionMode.EdgeHide, "edge interaction mode persists");
+    Assert(loaded.Settings.QrRecognitionHotKey == "Ctrl+Shift+Q", "QR recognition hotkey persists");
+    Assert(loaded.Settings.QrRecognitionFrameBounds?.Left == -800, "QR frame bounds persist");
     Assert(loaded.Settings.TopmostHotKeys.Single().LayoutIds.SequenceEqual([tab.Id]), "targeted hotkey layout persists");
     Assert(loaded.Groups.Single().DockEdge == DockEdge.Right, "dock edge persists");
 
@@ -571,6 +816,13 @@ static async Task TestHotKeyAndDockPersistenceAsync(string root)
     var migrated = await legacyStore.LoadAsync();
     Assert(migrated.Settings.TopmostHotKeys.Single().Gesture == "Ctrl+Alt+L" && migrated.Settings.TopmostHotKeys.Single().AllLayouts,
         "legacy single hotkey migrates to all-layout binding");
+
+    var legacyQrDirectory = Path.Combine(root, "legacy-qr-hotkey-state");
+    Directory.CreateDirectory(legacyQrDirectory);
+    await File.WriteAllTextAsync(Path.Combine(legacyQrDirectory, "layout.json"), "{\"Version\":12,\"Settings\":{\"TopmostHotKeys\":[]}}");
+    var legacyQr = await new LayoutStore(legacyQrDirectory).LoadAsync();
+    Assert(legacyQr.Settings.QrRecognitionHotKey == string.Empty, "missing QR hotkey migrates to disabled");
+    Assert(legacyQr.Settings.QrRecognitionFrameBounds is null, "legacy QR frame bounds migrate to empty");
 }
 
 static async Task TestLayoutBackupAsync(string root)
@@ -904,10 +1156,13 @@ static void TestDesktopWindowStyle(string root)
             var standardMode = (System.Windows.Controls.RadioButton)settingsWindow.FindName("StandardModeRadio");
             var hotKeysGrid = (System.Windows.Controls.DataGrid)settingsWindow.FindName("HotKeysGrid");
             var hotKeyTargets = (System.Windows.Controls.ListBox)settingsWindow.FindName("HotKeyTargetsList");
+            var qrHotKey = (System.Windows.Controls.TextBox)settingsWindow.FindName("QrRecognitionHotKeyTextBox");
+            var topmostHotKeyCard = (System.Windows.Controls.Border)settingsWindow.FindName("HotKeySettingsCard");
             var applyButton = (System.Windows.Controls.Button)settingsWindow.FindName("ApplyButton");
             Assert(IsDarkSurface(standardMode.Background), "settings mode selector uses dark themed surface");
             Assert(IsDarkSurface(hotKeysGrid.Background), "settings hotkey grid does not fall back to white system surface");
             Assert(IsDarkSurface(hotKeyTargets.Background), "settings target list does not fall back to white system surface");
+            Assert(IsDarkSurface(qrHotKey.Background), "settings QR hotkey editor does not fall back to white system surface");
             Assert(settingsWindow.NormalLayoutChoices.Count == 1 &&
                 settingsWindow.NormalLayoutChoices[0].Id == definition.Id.ToString(),
                 "folder mapping layouts are excluded from rule targets");
@@ -917,6 +1172,7 @@ static void TestDesktopWindowStyle(string root)
             standardMode.IsChecked = false;
             ((System.Windows.Controls.RadioButton)settingsWindow.FindName("EdgeHideModeRadio")).IsChecked = true;
             Assert(applyButton.IsEnabled, "interaction mode changes mark settings dirty");
+            Assert(!topmostHotKeyCard.IsEnabled && qrHotKey.IsEnabled, "QR hotkey stays available in edge-hide mode");
             Assert(window.IsEnabled, "non-modal settings keeps layouts interactive");
             var renamedDefinition = SnapshotService.CloneGroups([definition]).Single();
             renamedDefinition.Title = "renamed while settings open";
@@ -930,6 +1186,60 @@ static void TestDesktopWindowStyle(string root)
             Assert(settingsWindow.ResultLayoutRules[0].GroupId == definition.Id.ToString(),
                 "adding a layout preserves existing rule target id");
             settingsWindow.Close();
+
+            var overlayFrame = CreateSolidFrame(120, 120, 255, new System.Drawing.Rectangle(-12500, -12500, 120, 120));
+            var overlay = new QrSelectionOverlayWindow(overlayFrame.Bounds, ScreenCaptureService.ToBitmapSource(overlayFrame))
+            {
+                Opacity = 0
+            };
+            overlay.Show();
+            overlay.ShowSelection(new System.Drawing.Rectangle(-12470, -12460, 50, 40));
+            var mask = (System.Windows.Shapes.Rectangle)overlay.FindName("MaskLayer");
+            var selectionSnapshot = (System.Windows.Controls.Image)overlay.FindName("SelectionSnapshot");
+            var selectionBorder = (System.Windows.Controls.Border)overlay.FindName("SelectionBorder");
+            Assert(mask.Fill is System.Windows.Media.SolidColorBrush { Color.A: 0x59 }, "QR capture mask uses 35 percent opacity");
+            Assert(selectionSnapshot.Visibility == System.Windows.Visibility.Visible &&
+                selectionSnapshot.Clip is System.Windows.Media.RectangleGeometry { Rect.Width: > 0, Rect.Height: > 0 },
+                "QR capture selection reveals the frozen screenshot inside the border");
+            Assert(selectionBorder.Visibility == System.Windows.Visibility.Visible, "QR capture selection border is visible");
+            overlay.ClearSelection();
+            Assert(selectionSnapshot.Visibility == System.Windows.Visibility.Collapsed && selectionSnapshot.Clip is null &&
+                selectionBorder.Visibility == System.Windows.Visibility.Collapsed, "QR capture selection clears without closing the overlay");
+            overlay.Close();
+
+            var frameWindow = new QrRecognitionFrameWindow(new System.Drawing.Rectangle(-12600, -12600, 320, 240))
+            {
+                Opacity = 0
+            };
+            frameWindow.Show();
+            var captureBounds = new System.Drawing.Rectangle(-12600, -12600, 320, 240);
+            var outerBounds = new System.Drawing.Rectangle(-12600, -12634, 320, 274);
+            frameWindow.SetFrameBounds(captureBounds, outerBounds, 34);
+            var frameRoot = (System.Windows.Controls.Grid)frameWindow.FindName("Root");
+            var titleBar = (System.Windows.Controls.Border)frameWindow.FindName("TitleBar");
+            var captureRoot = (System.Windows.Controls.Grid)frameWindow.FindName("CaptureRoot");
+            var border = captureRoot.Children.OfType<System.Windows.Controls.Border>().Single();
+            var sizeText = (System.Windows.Controls.TextBlock)frameWindow.FindName("SizeText");
+            var recognizeButton = (System.Windows.Controls.Button)frameWindow.FindName("RecognizeButton");
+            var closeButton = (System.Windows.Controls.Button)frameWindow.FindName("CloseButton");
+            Assert(titleBar.Background is System.Windows.Media.SolidColorBrush titleBrush && titleBrush.Color.R == 0x18,
+                "QR frame uses a VS Code dark title bar");
+            Assert(titleBar.Child is System.Windows.Controls.Grid &&
+                ((System.Windows.Controls.Grid)titleBar.Child).Children.OfType<System.Windows.Controls.StackPanel>()
+                    .SelectMany(panel => panel.Children.OfType<System.Windows.Controls.TextBlock>())
+                    .Any(text => text.Text == "二维码识别"), "QR frame title is shown in the upper left");
+            Assert(sizeText.Text == "320 × 240 px", "QR frame shows physical pixel dimensions");
+            Assert(frameRoot.ActualWidth > 0 && frameRoot.ActualHeight > 0 && captureRoot.ActualWidth > 0,
+                "single QR frame maintains outer and capture bounds");
+            Assert(border.BorderThickness.Left == 1 && captureRoot.Children.OfType<System.Windows.Controls.Border>().Count() == 1,
+                "QR frame uses one continuous border without corner blocks");
+            Assert(recognizeButton.Width == 62 && closeButton.Width == 30,
+                "single QR frame reserves primary and close-button space");
+            Assert((string)recognizeButton.ToolTip == "识别二维码 (Enter)" && (string)closeButton.ToolTip == "退出取景框 (Esc)",
+                "single QR frame exposes recognize and exit actions");
+            Assert(frameWindow.WindowBounds.Top == frameWindow.FrameBounds.Top - 34,
+                "single QR frame keeps title bar outside capture bounds");
+            frameWindow.Close();
 
             var manyRules = Enumerable.Range(0, 500).Select(index => new LayoutMatchRule
             {

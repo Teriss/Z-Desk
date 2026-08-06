@@ -134,6 +134,15 @@ public sealed class LayoutStore
         state.LayoutMatchRules ??= LayoutMatchRule.CreateDefaults();
         state.DesktopIconPlacements ??= [];
         state.Settings.TopmostHotKeys ??= [];
+        state.Settings.QrRecognitionHotKey ??= string.Empty;
+        if (state.Version < 14)
+            state.Settings.QrRecognitionFrameBounds = null;
+        else if (state.Settings.QrRecognitionFrameBounds is { } frame)
+            state.Settings.QrRecognitionFrameBounds = frame with
+            {
+                Width = Math.Max(240, frame.Width),
+                Height = Math.Max(160, frame.Height)
+            };
         if (state.Settings.TopmostHotKeys.Count == 0 && !string.IsNullOrWhiteSpace(state.Settings.TopmostHotKey))
         {
             state.Settings.TopmostHotKeys.Add(new TopmostHotKeyBinding

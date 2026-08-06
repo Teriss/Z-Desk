@@ -22,6 +22,7 @@
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
     <Resource Include="Assets\ZDesk.ico" />
+    <PackageReference Include="ZXingCpp" Version="0.5.3" />
   </ItemGroup>
 
   <Target Name="BuildExplorerCommand" BeforeTargets="BeforeBuild" Condition="'$(Configuration)' == 'Release' and '$(PortableSingleExe)' != 'true'">

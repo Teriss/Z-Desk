@@ -24,6 +24,7 @@ AppState
 - `LayoutMatchRule.GroupId` 指向普通布局或普通页签。
 - `FileEntry` 只缓存真实路径的元数据和 Shell 图标；条目进入可视区后才启动对应的 Shell 加载任务，图标换行视图由回收式虚拟化面板限制容器数量。
 - `AppSettings.TopmostHotKeys` 保存多条置顶快捷键；旧版单快捷键在 `LayoutStore` 载入时迁移为“全部布局”绑定。
+- `AppSettings.QrRecognitionHotKey` 保存二维码识别的单条全局快捷键；空值表示不注册该功能。
 - `LayoutMatchRule.PathContains` 与扩展名同时参与匹配；快捷方式目标由 `ShortcutTargetService` 解析。
 - `AppSettings.InteractionMode` 控制标准吸附或 QQ 式贴边隐藏，`GroupDefinition.DockEdge` 保存左、右、上停靠边。
 
@@ -63,6 +64,10 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 
 布局页签拖出时先从宿主移除；释放到原宿主恢复原索引，释放到其他布局合并，释放到空白处保留为独立窗口。
 
+二维码识别由 `QrRecognitionFrameController` 管理一个可复用的 `QrRecognitionFrameWindow`：同一窗口承载 VS Code 风格标题栏、尺寸文本、识别/关闭按钮和连续边框。标题栏负责移动，八向透明命中区负责缩放，取景区域通过 `WM_NCHITTEST` 中央透明命中穿透到背后应用。快捷键不捕获或冻结桌面，外层窗口边界与内部物理捕获边界分开计算，跨屏移动始终使用物理坐标。窗口不设置 `WDA_EXCLUDEFROMCAPTURE`，因此远程桌面软件可以显示取景框；点击识别后先隐藏窗口，再调用 `ScreenCaptureService.CaptureRegion`，避免把自身 UI 截入图像。
+
+点击“识别”或按 Enter 后，控制器隐藏取景框并调用 `ScreenCaptureService.CaptureRegion`，按显示器交集复制选区，显示器间隙填白，不创建虚拟桌面尺寸缓冲。捕获和 `QrCodeRecognitionService` 解码在后台执行；识别服务使用 ZXingCpp，仅扫描 QR Code，并对原图、对比度拉伸灰度和各颜色通道执行局部/全局二值化回退，再按定位范围合并同一二维码的重复命中。捕获异常时恢复取景框以便重试；结果窗口只提供正文复制，不执行或联网解析二维码内容。
+
 ## 5. 持久化
 
 - `LayoutStore`：`layout.json`、备份、版本校验和损坏恢复。
@@ -71,6 +76,7 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 - `RuleHistoryService`：规则执行历史。
 - `RecoveryService`：会话异常标记。
 - `LogService`：按日期日志与保留策略。
+- 二维码取景框边界属于用户设置，保存为 `AppSettings.QrRecognitionFrameBounds`；屏幕图像和二维码正文不是持久化数据，只在一次识别会话内驻留内存。
 - `AppDataPathService`：路径配置、目录迁移和运行时服务切换。
 
 路径指针保存在 `HKCU\Software\ZDesk`。迁移先复制，成功后切换路径，旧目录保留为备份。
@@ -90,8 +96,9 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 
 ## 8. 测试
 
-`tests/ZDesk.SmokeTests` 覆盖 Shell 重命名/复制/移动、QuickLook Provider、映射选择隔离、规则属性通知、500 条规则页 Dispatcher 响应、备份恢复、视图/排序/页签、窗口 Z 序、自动折叠、首次初始化、路径迁移和非模态设置同步。QuickLook 实际安装、回收站取消、跨应用拖放、多显示器和扩展菜单需要人工验收。
+`tests/ZDesk.SmokeTests` 覆盖 Shell 重命名/复制/移动、QuickLook Provider、映射选择隔离、规则属性通知、二维码单码/多码/同文重复/旋转/反色/风格化样例识别、v13→v14 配置迁移、取景框默认尺寸/最小尺寸/夹取/工具条定位和区域捕获几何、500 条规则页 Dispatcher 响应、备份恢复、视图/排序/页签、窗口 Z 序、自动折叠、首次初始化、路径迁移和非模态设置同步。取景框穿透、八向缩放、跨 DPI 和真实视频画面仍需人工验收。
 
 ## 9. UI 主题
 
 设置中心采用左侧单列导航和右侧卡片内容区。通用颜色与控件样式由 `Resources/SettingsTheme.xaml` 及设置窗口资源提供；深色界面不得使用 WPF 默认白底控件或系统图标字体。新增界面必须遵守 [UI 设计规范](UI_STYLE.md) 并完成多 DPI、交互状态和 Win10/Win11 验收。
+二维码识别使用 `QrRecognitionFrameController` 管理可复用取景框。进入模式不捕获桌面；识别时 `ScreenCaptureService.CaptureRegion` 只复制物理选区与显示器交集，空隙填白，随后在后台调用 ZXingCpp。

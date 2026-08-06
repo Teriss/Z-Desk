@@ -1,0 +1,23 @@
+<Window x:Class="ZDesk.Windows.QrSelectionOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="False"
+        AllowsTransparency="True" Background="#FF000000" Topmost="True" Cursor="Cross"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        UseLayoutRounding="True" SnapsToDevicePixels="True">
+    <Grid x:Name="OverlaySurface" Background="Transparent" Focusable="True"
+          PreviewMouseLeftButtonDown="Surface_MouseLeftButtonDown"
+          PreviewMouseMove="Surface_MouseMove"
+          PreviewMouseLeftButtonUp="Surface_MouseLeftButtonUp"
+          PreviewMouseRightButtonDown="Surface_MouseRightButtonDown"
+          PreviewMouseRightButtonUp="Surface_MouseRightButtonUp"
+          LostMouseCapture="Surface_LostMouseCapture">
+        <Image x:Name="SnapshotImage" Stretch="Fill" />
+        <Rectangle x:Name="MaskLayer" Fill="#59000000" IsHitTestVisible="False" />
+        <Image x:Name="SelectionSnapshot" Stretch="Fill" Visibility="Collapsed" IsHitTestVisible="False" />
+        <Border x:Name="SelectionBorder" Visibility="Collapsed"
+                HorizontalAlignment="Left" VerticalAlignment="Top"
+                Background="#1466B6FF" BorderBrush="#FF78B9FF" BorderThickness="1"
+                IsHitTestVisible="False" />
+    </Grid>
+</Window>

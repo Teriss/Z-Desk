@@ -360,7 +360,17 @@
                 <TabItem Header="快捷键">
                     <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel>
                         <TextBlock Text="快捷键" FontSize="24" FontWeight="SemiBold" />
-                        <TextBlock Text="标准吸附模式下，每条快捷键可以独立切换指定布局的临时置顶状态" Margin="0,4,0,18" Foreground="{StaticResource MutedBrush}" />
+                        <TextBlock Text="二维码识别可在任何贴边模式下使用；布局置顶快捷键仅在标准吸附模式下生效。" Margin="0,4,0,18" Foreground="{StaticResource MutedBrush}" />
+                        <Border Style="{StaticResource SectionCard}" Margin="0,0,0,18">
+                            <StackPanel>
+                                <TextBlock Text="二维码识别" FontWeight="SemiBold" />
+                                <TextBlock Text="录制全局快捷键后，框选屏幕区域即可识别其中全部二维码。未设置时不会注册快捷键。" Margin="0,5,0,12" FontSize="11" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBox x:Name="QrRecognitionHotKeyTextBox" Height="38" IsReadOnly="True" VerticalContentAlignment="Center" PreviewKeyDown="QrRecognitionHotKeyTextBox_PreviewKeyDown" />
+                                    <Button Grid.Column="1" Content="清除" Margin="8,0,0,0" Click="ClearQrRecognitionHotKey_Click" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
                         <Border x:Name="HotKeySettingsCard" Style="{StaticResource SectionCard}">
                             <StackPanel>
                                 <TextBlock Text="贴边隐藏（QQ 模式）下快捷键不生效" Margin="0,0,0,10" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />

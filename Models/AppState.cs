@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.Drawing;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 
@@ -6,7 +7,7 @@ namespace ZDesk.Models;
 
 public sealed class AppState
 {
-    public const int CurrentVersion = 12;
+    public const int CurrentVersion = 14;
 
     public int Version { get; set; } = CurrentVersion;
     public AppSettings Settings { get; set; } = new();
@@ -162,11 +163,18 @@ public sealed class AppSettings
     public bool RunRulesOnFolderChanges { get; set; }
     public int RuleIntervalMinutes { get; set; } = 30;
     public bool AutoSwitchDisplayLayouts { get; set; }
+    public string QrRecognitionHotKey { get; set; } = string.Empty;
+    public QrRecognitionFrameBounds? QrRecognitionFrameBounds { get; set; }
     public List<TopmostHotKeyBinding> TopmostHotKeys { get; set; } = [];
     public LayoutInteractionMode InteractionMode { get; set; } = LayoutInteractionMode.Standard;
     // Legacy field is read during migration and cleared before the next save.
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? TopmostHotKey { get; set; }
+}
+
+public sealed record QrRecognitionFrameBounds(int Left, int Top, int Width, int Height)
+{
+    public Rectangle ToRectangle() => new(Left, Top, Width, Height);
 }
 
 public sealed class TopmostHotKeyBinding

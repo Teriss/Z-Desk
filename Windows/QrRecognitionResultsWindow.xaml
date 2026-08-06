@@ -1,0 +1,54 @@
+<Window x:Class="ZDesk.Windows.QrRecognitionResultsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="二维码识别" Width="620" Height="460" MinWidth="440" MinHeight="300"
+        WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize"
+        AllowsTransparency="True" Background="Transparent" UseLayoutRounding="True" SnapsToDevicePixels="True"
+        Foreground="{StaticResource SettingsTextBrush}"
+        FontFamily="Segoe UI Variable Text, Segoe UI" Icon="/ZDesk;component/Assets/ZDesk.ico">
+    <Border Background="{StaticResource SettingsSurfaceBrush}" BorderBrush="#FF353741" BorderThickness="1" CornerRadius="6">
+    <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="46" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <Border Background="{StaticResource SettingsTitleBarBrush}" BorderBrush="{StaticResource SettingsLineBrush}" BorderThickness="0,0,0,1"
+                MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <Grid>
+                <TextBlock Text="二维码识别" Margin="18,0" VerticalAlignment="Center" FontWeight="SemiBold" />
+                <Button HorizontalAlignment="Right" Width="46" Height="46" Margin="0" Padding="0"
+                        Background="Transparent" BorderBrush="Transparent" Content="×" FontSize="18" Click="CloseButton_Click" />
+            </Grid>
+        </Border>
+        <Grid Grid.Row="1" Margin="20,18">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+            <TextBlock x:Name="SummaryText" Foreground="{StaticResource SettingsMutedBrush}" />
+            <ListBox x:Name="ResultsList" Grid.Row="1" Margin="0,14,0,0" BorderBrush="{StaticResource SettingsLineBrush}" BorderThickness="1"
+                     Background="#FF1B1D24" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="Padding" Value="0" /><Setter Property="Margin" Value="0" />
+                        <Setter Property="Background" Value="Transparent" />
+                        <Setter Property="BorderThickness" Value="0,0,0,1" /><Setter Property="BorderBrush" Value="#FF353741" />
+                        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"><ContentPresenter /></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#FF24262E" /></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="12,10"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Index}" Width="28" VerticalAlignment="Top" Foreground="{StaticResource SettingsMutedBrush}" />
+                            <TextBox Grid.Column="1" Text="{Binding Text}" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="32"
+                                     Background="#FF24262E" Foreground="{StaticResource SettingsTextBrush}" BorderBrush="#FF40434F" BorderThickness="1" Padding="9,6" />
+                            <Button Grid.Column="2" Content="复制" Margin="10,0,0,0" VerticalAlignment="Top" Click="CopyItem_Click" Tag="{Binding Text}" />
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+            <TextBlock x:Name="EmptyText" Grid.Row="1" Margin="0,14,0,0" Visibility="Collapsed" VerticalAlignment="Center" HorizontalAlignment="Center" Foreground="{StaticResource SettingsMutedBrush}" Text="选区内未识别到二维码。" />
+        </Grid>
+        <Border Grid.Row="2" Background="#FF191A21" BorderBrush="{StaticResource SettingsLineBrush}" BorderThickness="0,1,0,0">
+            <Grid Margin="18,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <TextBlock x:Name="StatusText" VerticalAlignment="Center" Foreground="#FFFFBABA" TextTrimming="CharacterEllipsis" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal"><Button x:Name="CopyAllButton" Content="复制全部" Click="CopyAll_Click" /><Button Content="关闭" Margin="0" Click="CloseButton_Click" /></StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+    </Border>
+</Window>

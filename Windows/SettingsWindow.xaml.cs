@@ -152,6 +152,7 @@ public partial class SettingsWindow : Window
         DisplayProfilesCheckBox.IsChecked = settings.AutoSwitchDisplayLayouts;
         StandardModeRadio.IsChecked = settings.InteractionMode == LayoutInteractionMode.Standard;
         EdgeHideModeRadio.IsChecked = settings.InteractionMode == LayoutInteractionMode.EdgeHide;
+        QrRecognitionHotKeyTextBox.Text = Result.QrRecognitionHotKey;
         UpdateHotKeyEditorState();
         AnimationsCheckBox.IsChecked = settings.EnableAnimations;
         OpacitySlider.Value = settings.ContainerOpacity * 100;
@@ -353,6 +354,16 @@ public partial class SettingsWindow : Window
         result = Result;
         if (SelectedHotKey is { } selected && !selected.AllLayouts)
             selected.LayoutIds = HotKeyTargetChoices.Where(choice => choice.IsSelected).Select(choice => choice.Id).ToList();
+        var gestures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(Result.QrRecognitionHotKey))
+        {
+            if (!HotKeyParser.TryParse(Result.QrRecognitionHotKey, out var qrGesture, out var error) || qrGesture is null)
+            {
+                HotKeyErrorText.Text = $"二维码快捷键配置无效：{error}";
+                return false;
+            }
+            gestures.Add(qrGesture.DisplayText);
+        }
         foreach (var binding in Result.TopmostHotKeys.Where(binding => binding.Enabled &&
                      (EdgeHideModeRadio.IsChecked != true)))
         {
@@ -364,6 +375,11 @@ public partial class SettingsWindow : Window
             if (!binding.AllLayouts && binding.LayoutIds.Count == 0)
             {
                 HotKeyErrorText.Text = "每条启用的快捷键至少要选择一个布局。";
+                return false;
+            }
+            if (!HotKeyParser.TryParse(binding.Gesture, out var gesture, out _) || gesture is null || !gestures.Add(gesture.DisplayText))
+            {
+                HotKeyErrorText.Text = "二维码识别和布局置顶快捷键不能重复。";
                 return false;
             }
         }
@@ -411,8 +427,10 @@ public partial class SettingsWindow : Window
             AutoRunRules = AutoRulesCheckBox.IsChecked == true,
             RunRulesOnFolderChanges = WatchRulesCheckBox.IsChecked == true,
             RuleIntervalMinutes = interval,
-         TopmostHotKeys = Result.TopmostHotKeys.Select(CloneHotKeyBinding).ToList(),
-         TopmostHotKey = null,
+        QrRecognitionHotKey = Result.QrRecognitionHotKey.Trim(),
+            QrRecognitionFrameBounds = Result.QrRecognitionFrameBounds,
+            TopmostHotKeys = Result.TopmostHotKeys.Select(CloneHotKeyBinding).ToList(),
+            TopmostHotKey = null,
         };
         return true;
     }
@@ -468,10 +486,41 @@ public partial class SettingsWindow : Window
 
     private void HotKeyTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (!TryRecordHotKey(e, out var gesture)) return;
+        HotKeyTextBox.Text = gesture;
+        if (SelectedHotKey is { } binding)
+        {
+            binding.Gesture = HotKeyTextBox.Text;
+            HotKeysGrid.Items.Refresh();
+        }
+        HotKeyErrorText.Text = string.Empty;
+        MarkSettingsDirty();
+    }
+
+    private void QrRecognitionHotKeyTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!TryRecordHotKey(e, out var gesture)) return;
+        Result.QrRecognitionHotKey = gesture;
+        QrRecognitionHotKeyTextBox.Text = gesture;
+        HotKeyErrorText.Text = string.Empty;
+        MarkSettingsDirty();
+    }
+
+    private void ClearQrRecognitionHotKey_Click(object sender, RoutedEventArgs e)
+    {
+        Result.QrRecognitionHotKey = string.Empty;
+        QrRecognitionHotKeyTextBox.Text = string.Empty;
+        HotKeyErrorText.Text = string.Empty;
+        MarkSettingsDirty();
+    }
+
+    private bool TryRecordHotKey(KeyEventArgs e, out string gesture)
+    {
+        gesture = string.Empty;
         e.Handled = true;
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         if (key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt or
-            Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin) return;
+            Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin) return false;
 
         var modifiers = Keyboard.Modifiers;
         var parts = new List<string>();
@@ -482,7 +531,7 @@ public partial class SettingsWindow : Window
         if (parts.Count == 0)
         {
             HotKeyErrorText.Text = "请同时按住至少一个修饰键。";
-            return;
+            return false;
         }
 
         var keyName = key switch
@@ -499,17 +548,11 @@ public partial class SettingsWindow : Window
         if (string.IsNullOrEmpty(keyName))
         {
             HotKeyErrorText.Text = "这个按键暂不支持录制。";
-            return;
+            return false;
         }
         parts.Add(keyName);
-        HotKeyTextBox.Text = string.Join('+', parts);
-        if (SelectedHotKey is { } binding)
-        {
-            binding.Gesture = HotKeyTextBox.Text;
-            HotKeysGrid.Items.Refresh();
-        }
-        HotKeyErrorText.Text = string.Empty;
-        MarkSettingsDirty();
+        gesture = string.Join('+', parts);
+        return true;
     }
 
     private void RestoreBackupButton_Click(object sender, RoutedEventArgs e)
@@ -957,6 +1000,8 @@ public partial class SettingsWindow : Window
         GroupsHidden = settings.GroupsHidden,
         RememberTopmost = false,
         AutoSwitchDisplayLayouts = settings.AutoSwitchDisplayLayouts,
+        QrRecognitionHotKey = settings.QrRecognitionHotKey,
+        QrRecognitionFrameBounds = settings.QrRecognitionFrameBounds,
         IsTopmost = false,
         EnableAnimations = settings.EnableAnimations,
         ContainerOpacity = settings.ContainerOpacity,
