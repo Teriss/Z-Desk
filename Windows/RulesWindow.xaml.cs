@@ -24,6 +24,7 @@ public partial class RulesWindow : Window
 
     public RulesWindow(IEnumerable<ClassificationRule> rules)
     {
+        (Application.Current as ZDesk.App)?.EnsureSettingsResources();
         InitializeComponent();
         Rules = new ObservableCollection<ClassificationRule>(rules.Select(Clone));
         RulesGrid.ItemsSource = Rules;

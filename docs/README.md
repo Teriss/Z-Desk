@@ -8,6 +8,7 @@
 - [0.1.2 发布说明](RELEASE_NOTES_0.1.2.md)：本次版本改动内容。
 - [0.1.3 发布说明](RELEASE_NOTES_0.1.3.md)：本次版本改动内容。
 - [0.1.4 发布说明](RELEASE_NOTES_0.1.4.md)：二维码识别取景框和远程桌面可见性改进。
+- [0.1.5 发布说明](RELEASE_NOTES_0.1.5.md)：选择滚动修复、WPF 路径内存优化和 QuickLook 稳定性改进。
 - [贡献指南](../CONTRIBUTING.md)：构建、测试和提交规范。
 - [安全说明](../SECURITY.md)：漏洞报告和敏感信息处理方式。
 - [第三方许可说明](../THIRD_PARTY_NOTICES.md)：随项目分发的第三方组件许可。

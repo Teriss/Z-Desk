@@ -126,6 +126,7 @@ public partial class SettingsWindow : Window
         IEnumerable<ClassificationRule> rules,
         IEnumerable<LayoutMatchRule> layoutRules)
     {
+        (Application.Current as ZDesk.App)?.EnsureSettingsResources();
         InitializeComponent();
         AddHandler(ToggleButton.CheckedEvent, new RoutedEventHandler(SettingsValue_Changed));
         AddHandler(ToggleButton.UncheckedEvent, new RoutedEventHandler(SettingsValue_Changed));

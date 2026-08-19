@@ -22,6 +22,9 @@ public sealed class DesktopGroupWindow : Window
     private System.Drawing.Rectangle _dockWorkingAreaPixels;
     private System.Drawing.Rectangle _dockExpandedBoundsPixels;
     private Point? _dockExpandedPosition;
+    private readonly bool _nativePresentation;
+    private readonly int _nativeCornerRadius;
+    private bool _visualTreeDetached;
 
     public GroupContainer Group { get; }
 
@@ -30,6 +33,7 @@ public sealed class DesktopGroupWindow : Window
     public event EventHandler? SettingsRequested;
     public event EventHandler? ExitRequested;
     public event EventHandler? InteractionRequested;
+    public event EventHandler? UserInteraction;
     // Kept as a compatibility event for integrations; layout selection no
     // longer needs to synchronize Explorer for QuickLook.
     public event Action<IReadOnlyList<string>>? ShellSelectionRequested
@@ -40,6 +44,13 @@ public sealed class DesktopGroupWindow : Window
 
     public bool IsEdgeHidden => _edgeHidden;
     public bool IsTemporaryTopmost => _temporaryTopmost;
+    public bool IsVisualTreeAttached => !_visualTreeDetached;
+    internal void DetachVisualTreeForNativePresentation()
+    {
+        if (_visualTreeDetached) return;
+        Content = null;
+        _visualTreeDetached = true;
+    }
     public bool IsPointWithinWindow(System.Drawing.Point point)
     {
         var handle = new WindowInteropHelper(this).Handle;
@@ -57,9 +68,13 @@ public sealed class DesktopGroupWindow : Window
         double iconSize = 88,
         double animationSpeed = 1.0)
     {
+        // A shaped top-level window avoids the expensive WPF layered-window
+        // composition path while preserving the existing WPF content tree.
+        _nativePresentation = true;
+        _nativeCornerRadius = (int)Math.Clamp(cornerRadius, 0, 24);
         WindowStyle = WindowStyle.None;
-        AllowsTransparency = true;
-        Background = Brushes.Transparent;
+        AllowsTransparency = false;
+        Background = Brushes.Black;
         ShowInTaskbar = false;
         ShowActivated = false;
         ResizeMode = ResizeMode.NoResize;
@@ -83,6 +98,7 @@ public sealed class DesktopGroupWindow : Window
         Group.RemoveRequested += (_, _) => RemoveRequested?.Invoke(this, EventArgs.Empty);
         Group.SettingsRequested += (_, _) => SettingsRequested?.Invoke(this, EventArgs.Empty);
         Group.ExitRequested += (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty);
+        Group.UserInteraction += (_, _) => UserInteraction?.Invoke(this, EventArgs.Empty);
         Content = Group;
 
         var placement = GetSafePlacement(definition);
@@ -90,6 +106,7 @@ public sealed class DesktopGroupWindow : Window
         Top = placement.Y;
 
         LocationChanged += (_, _) => CaptureDesktopPlacement();
+        if (_nativePresentation) SizeChanged += (_, _) => UpdateNativeWindowRegion();
         PreviewMouseDown += (_, _) => InteractionRequested?.Invoke(this, EventArgs.Empty);
         Activated += (_, _) => Dispatcher.BeginInvoke(
             () => InteractionRequested?.Invoke(this, EventArgs.Empty),
@@ -104,6 +121,11 @@ public sealed class DesktopGroupWindow : Window
 
     public void ShowAnimated()
     {
+        if (_visualTreeDetached)
+        {
+            Content = Group;
+            _visualTreeDetached = false;
+        }
         if (!IsVisible)
         {
             Show();
@@ -357,7 +379,21 @@ public sealed class DesktopGroupWindow : Window
             SwpNoMove | SwpNoSize | SwpNoActivate | SwpNoZOrder | SwpFrameChanged);
         _source = HwndSource.FromHwnd(handle);
         _source?.AddHook(WindowMessageHook);
+        UpdateNativeWindowRegion();
         RestoreDesktopLayer();
+    }
+
+    private void UpdateNativeWindowRegion()
+    {
+        if (!_nativePresentation) return;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == nint.Zero || !GetWindowRect(handle, out var bounds)) return;
+        var width = Math.Max(1, bounds.Right - bounds.Left);
+        var height = Math.Max(1, bounds.Bottom - bounds.Top);
+        var radius = Math.Clamp(_nativeCornerRadius * 2, 0, Math.Min(width, height));
+        var region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius);
+        if (region == nint.Zero) return;
+        if (SetWindowRgn(handle, region, true) == 0) DeleteObject(region);
     }
 
     private nint WindowMessageHook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
@@ -387,6 +423,10 @@ public sealed class DesktopGroupWindow : Window
             if (IsVisible)
             {
                 Hide();
+                // A hidden WPF window otherwise keeps the complete file-list
+                // visual tree and its renderer resources alive indefinitely.
+                Content = null;
+                _visualTreeDetached = true;
             }
         });
     }
@@ -609,5 +649,15 @@ public sealed class DesktopGroupWindow : Window
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool GetWindowRect(nint window, out NativeRect rectangle);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int SetWindowRgn(nint window, nint region, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)] bool redraw);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern nint CreateRoundRectRgn(int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool DeleteObject(nint objectHandle);
 
 }

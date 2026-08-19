@@ -36,6 +36,7 @@ public partial class LayoutLockWindow : Window
 
     public LayoutLockWindow(IEnumerable<GroupDefinition> groups)
     {
+        (Application.Current as ZDesk.App)?.EnsureSettingsResources();
         InitializeComponent();
         foreach (var option in CreateOptions(groups)) Options.Add(option);
         LayoutOptionsList.ItemsSource = Options;

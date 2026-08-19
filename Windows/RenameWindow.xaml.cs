@@ -8,6 +8,7 @@ public partial class RenameWindow : Window
     public string NewName => NameTextBox.Text.Trim();
     public RenameWindow(string currentName)
     {
+        (Application.Current as ZDesk.App)?.EnsureBaseResources();
         InitializeComponent();
         NameTextBox.Text = currentName;
         NameTextBox.SelectAll();

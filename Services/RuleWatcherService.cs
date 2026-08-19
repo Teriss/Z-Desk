@@ -8,16 +8,23 @@ public sealed class RuleWatcherService : IDisposable
 {
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly DispatcherTimer _debounceTimer;
+    private bool _disposed;
     public event EventHandler? RulesTriggered;
 
     public RuleWatcherService(Dispatcher dispatcher)
     {
         _debounceTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = TimeSpan.FromSeconds(2) };
-        _debounceTimer.Tick += (_, _) => { _debounceTimer.Stop(); RulesTriggered?.Invoke(this, EventArgs.Empty); };
+        _debounceTimer.Tick += (_, _) =>
+        {
+            if (_disposed) return;
+            _debounceTimer.Stop();
+            RulesTriggered?.Invoke(this, EventArgs.Empty);
+        };
     }
 
     public void Configure(IEnumerable<ClassificationRule> rules, bool enabled)
     {
+        if (_disposed) return;
         ClearWatchers();
         if (!enabled) return;
         foreach (var folder in rules.Where(rule => rule.Enabled && Directory.Exists(rule.SourceFolder))
@@ -34,7 +41,22 @@ public sealed class RuleWatcherService : IDisposable
         }
     }
 
-    public void Dispose() { _debounceTimer.Stop(); ClearWatchers(); }
-    private void OnChanged(object sender, FileSystemEventArgs e) => _ = _debounceTimer.Dispatcher.BeginInvoke(() => { _debounceTimer.Stop(); _debounceTimer.Start(); });
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _debounceTimer.Stop();
+        ClearWatchers();
+    }
+    private void OnChanged(object sender, FileSystemEventArgs e)
+    {
+        if (_disposed) return;
+        _ = _debounceTimer.Dispatcher.BeginInvoke(() =>
+        {
+            if (_disposed) return;
+            _debounceTimer.Stop();
+            _debounceTimer.Start();
+        });
+    }
     private void ClearWatchers() { foreach (var watcher in _watchers) watcher.Dispose(); _watchers.Clear(); }
 }

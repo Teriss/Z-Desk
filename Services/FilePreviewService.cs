@@ -30,8 +30,7 @@ public sealed class FilePreviewService
             {
                 if (await provider.TryPreviewAsync(path)) return true;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
-                                       System.ComponentModel.Win32Exception or InvalidOperationException or COMException)
+            catch (Exception ex)
             {
                 LogService.Warning($"Preview provider failed for {Path.GetFileName(path)}", ex);
             }
@@ -53,6 +52,7 @@ public sealed class QuickLookPreviewProvider : IFilePreviewProvider
     private const string StoreAppUserModelId = "21090PaddyXu.QuickLook_egxr34yet59cg!App";
     private readonly Func<QuickLookLaunchTarget?> _targetResolver;
     private readonly Func<QuickLookLaunchTarget, string, bool> _launcher;
+    private readonly Lazy<Task<QuickLookLaunchTarget?>> _target;
 
     public QuickLookPreviewProvider()
         : this(FindLaunchTarget, Launch) { }
@@ -63,14 +63,16 @@ public sealed class QuickLookPreviewProvider : IFilePreviewProvider
     {
         _targetResolver = targetResolver;
         _launcher = launcher;
+        _target = new Lazy<Task<QuickLookLaunchTarget?>>(
+            () => Task.Run(_targetResolver));
     }
 
     public bool CanPreview(string path) => File.Exists(path) || Directory.Exists(path);
 
-    public Task<bool> TryPreviewAsync(string path)
+    public async Task<bool> TryPreviewAsync(string path)
     {
-        var target = _targetResolver();
-        return Task.FromResult(target is not null && _launcher(target, path));
+        var target = await _target.Value;
+        return target is not null && _launcher(target, path);
     }
 
     internal static QuickLookLaunchTarget? FindLaunchTarget()

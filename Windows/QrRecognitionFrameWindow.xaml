@@ -69,21 +69,21 @@
     <Grid x:Name="Root" Background="Transparent">
         <Grid x:Name="CaptureRoot" Margin="0,34,0,0" Background="Transparent">
             <Border BorderBrush="#FF007ACC" BorderThickness="1" Background="Transparent" IsHitTestVisible="False" />
-            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="12" HorizontalAlignment="Left" Cursor="SizeWE" Tag="Left"
+            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="24" HorizontalAlignment="Left" Cursor="SizeWE" Tag="Left"
                    DragStarted="ResizeThumb_DragStarted" DragDelta="ResizeThumb_DragDelta" DragCompleted="ResizeThumb_DragCompleted" />
-            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="12" HorizontalAlignment="Right" Cursor="SizeWE" Tag="Right"
+            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="24" HorizontalAlignment="Right" Cursor="SizeWE" Tag="Right"
                    DragStarted="ResizeThumb_DragStarted" DragDelta="ResizeThumb_DragDelta" DragCompleted="ResizeThumb_DragCompleted" />
-            <Thumb Style="{StaticResource InvisibleResizeThumb}" Height="12" VerticalAlignment="Top" Cursor="SizeNS" Tag="Top"
+            <Thumb Style="{StaticResource InvisibleResizeThumb}" Height="24" VerticalAlignment="Top" Cursor="SizeNS" Tag="Top"
                    DragStarted="ResizeThumb_DragStarted" DragDelta="ResizeThumb_DragDelta" DragCompleted="ResizeThumb_DragCompleted" />
-            <Thumb Style="{StaticResource InvisibleResizeThumb}" Height="12" VerticalAlignment="Bottom" Cursor="SizeNS" Tag="Bottom"
+            <Thumb Style="{StaticResource InvisibleResizeThumb}" Height="24" VerticalAlignment="Bottom" Cursor="SizeNS" Tag="Bottom"
                    DragStarted="ResizeThumb_DragStarted" DragDelta="ResizeThumb_DragDelta" DragCompleted="ResizeThumb_DragCompleted" />
-            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Top" Cursor="SizeNWSE" Tag="TopLeft"
+            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="36" Height="36" HorizontalAlignment="Left" VerticalAlignment="Top" Cursor="SizeNWSE" Tag="TopLeft"
                    DragStarted="ResizeThumb_DragStarted" DragDelta="ResizeThumb_DragDelta" DragCompleted="ResizeThumb_DragCompleted" />
-            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="18" Height="18" HorizontalAlignment="Right" VerticalAlignment="Top" Cursor="SizeNESW" Tag="TopRight"
+            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="36" Height="36" HorizontalAlignment="Right" VerticalAlignment="Top" Cursor="SizeNESW" Tag="TopRight"
                    DragStarted="ResizeThumb_DragStarted" DragDelta="ResizeThumb_DragDelta" DragCompleted="ResizeThumb_DragCompleted" />
-            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="18" Height="18" HorizontalAlignment="Left" VerticalAlignment="Bottom" Cursor="SizeNESW" Tag="BottomLeft"
+            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="36" Height="36" HorizontalAlignment="Left" VerticalAlignment="Bottom" Cursor="SizeNESW" Tag="BottomLeft"
                    DragStarted="ResizeThumb_DragStarted" DragDelta="ResizeThumb_DragDelta" DragCompleted="ResizeThumb_DragCompleted" />
-            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="18" Height="18" HorizontalAlignment="Right" VerticalAlignment="Bottom" Cursor="SizeNWSE" Tag="BottomRight"
+            <Thumb Style="{StaticResource InvisibleResizeThumb}" Width="36" Height="36" HorizontalAlignment="Right" VerticalAlignment="Bottom" Cursor="SizeNWSE" Tag="BottomRight"
                    DragStarted="ResizeThumb_DragStarted" DragDelta="ResizeThumb_DragDelta" DragCompleted="ResizeThumb_DragCompleted" />
         </Grid>
         <Border x:Name="TitleBar" Height="34" VerticalAlignment="Top" Background="#FF181818" BorderBrush="#FF3E3E42" BorderThickness="1"

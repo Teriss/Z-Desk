@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using ZDesk.Models;
 
 namespace ZDesk.Services;
 
@@ -13,7 +14,8 @@ public static class ShellIconService
     private const uint ShgfiIcon = 0x000000100;
     private const uint ShgfiLargeIcon = 0x000000000;
     private const uint ShgfiTypeName = 0x000000400;
-    private const int MaxImageCacheEntries = 1024;
+    public const int MaxImageCacheEntries = 256;
+    public const long MaxEstimatedImageCacheBytes = 16L * 1024 * 1024;
     private static readonly object CacheGate = new();
     private static readonly Dictionary<string, ImageSource?> Cache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Queue<string> CacheOrder = new();
@@ -25,7 +27,7 @@ public static class ShellIconService
         return GetCachedImage(key, () => LoadIcon(path));
     }
 
-    public static ImageSource? GetDisplayImage(string path, bool isDirectory, int requestedSize = 96)
+    public static ImageSource? GetDisplayImage(string path, bool isDirectory, int requestedSize = 64)
     {
         if (path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
         {
@@ -69,10 +71,60 @@ public static class ShellIconService
             if (Cache.TryGetValue(key, out var cached)) return cached;
             Cache[key] = image;
             CacheOrder.Enqueue(key);
-            while (Cache.Count > MaxImageCacheEntries && CacheOrder.TryDequeue(out var oldest))
-                Cache.Remove(oldest);
+            TrimCache();
         }
         return image;
+    }
+
+    public static ShellIconCacheDiagnostics GetCacheDiagnostics()
+    {
+        lock (CacheGate)
+        {
+            long estimatedBytes = 0;
+            foreach (var image in Cache.Values)
+            {
+                if (image is BitmapSource bitmap)
+                    estimatedBytes += (long)Math.Max(0, bitmap.PixelWidth) * Math.Max(0, bitmap.PixelHeight) * 4;
+            }
+            return new ShellIconCacheDiagnostics(
+                Cache.Count,
+                estimatedBytes,
+                MaxImageCacheEntries,
+                MaxEstimatedImageCacheBytes);
+        }
+    }
+
+    /// <summary>Releases shared image references after a long idle period.
+    /// Visible WPF items retain their own current source and can reload from
+    /// Shell on demand when recycled back into view.</summary>
+    public static ShellIconCacheDiagnostics ClearImageCache()
+    {
+        lock (CacheGate)
+        {
+            Cache.Clear();
+            CacheOrder.Clear();
+            return new ShellIconCacheDiagnostics(0, 0, MaxImageCacheEntries, MaxEstimatedImageCacheBytes);
+        }
+    }
+
+    private static void TrimCache()
+    {
+        while (Cache.Count > MaxImageCacheEntries || EstimateCacheBytes() > MaxEstimatedImageCacheBytes)
+        {
+            if (!CacheOrder.TryDequeue(out var oldest)) break;
+            Cache.Remove(oldest);
+        }
+    }
+
+    private static long EstimateCacheBytes()
+    {
+        long total = 0;
+        foreach (var image in Cache.Values)
+        {
+            if (image is BitmapSource bitmap)
+                total += (long)Math.Max(0, bitmap.PixelWidth) * Math.Max(0, bitmap.PixelHeight) * 4;
+        }
+        return total;
     }
 
     public static string GetTypeName(string path, bool isDirectory)

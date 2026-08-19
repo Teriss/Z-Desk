@@ -78,6 +78,13 @@ public partial class QrSelectionOverlayWindow : Window
         SelectionBorder.Visibility = Visibility.Collapsed;
     }
 
+    internal void ReleaseSnapshot()
+    {
+        SnapshotImage.Source = null;
+        SelectionSnapshot.Source = null;
+        SelectionSnapshot.Clip = null;
+    }
+
     public void CancelPointerSelection()
     {
         _pointerSelecting = false;

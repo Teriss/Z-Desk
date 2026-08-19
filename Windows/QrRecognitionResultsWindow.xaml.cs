@@ -13,6 +13,7 @@ public partial class QrRecognitionResultsWindow : Window
 
     public QrRecognitionResultsWindow(IReadOnlyList<QrCodeRecognitionResult> results)
     {
+        (Application.Current as ZDesk.App)?.EnsureSettingsResources();
         InitializeComponent();
         _results = results;
         ResultsList.ItemsSource = new ObservableCollection<ResultRow>(

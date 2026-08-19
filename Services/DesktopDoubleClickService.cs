@@ -27,6 +27,7 @@ public sealed class DesktopDoubleClickService : IDisposable
     private readonly Dispatcher _dispatcher;
     private readonly LowLevelMouseProc _hookProc;
     private nint _hook;
+    private bool _disposed;
     private uint _lastBlankClickTime;
     private Point _lastBlankClickPoint;
 
@@ -41,6 +42,7 @@ public sealed class DesktopDoubleClickService : IDisposable
 
     public bool Start()
     {
+        if (_disposed) return false;
         if (_hook != nint.Zero)
         {
             return true;
@@ -55,6 +57,7 @@ public sealed class DesktopDoubleClickService : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;
         if (_hook != nint.Zero)
         {
             UnhookWindowsHookEx(_hook);
@@ -69,6 +72,7 @@ public sealed class DesktopDoubleClickService : IDisposable
             var mouse = Marshal.PtrToStructure<MouseHookData>(data);
             _dispatcher.BeginInvoke(() =>
             {
+                if (_disposed) return;
                 LeftButtonClicked?.Invoke(new System.Drawing.Point(mouse.Position.X, mouse.Position.Y));
                 ProcessClick(mouse.Position, mouse.Time);
             }, DispatcherPriority.Input);

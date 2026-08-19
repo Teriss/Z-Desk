@@ -16,9 +16,12 @@ public static class QrCodeRecognitionService
         var results = new List<QrCodeRecognitionResult>();
         DecodeCandidate(frame.Pixels, frame.Width, frame.Height, ImageFormat.BGRA, frame.Stride, 4, results);
 
+        // Contrast candidates are decoded sequentially. Reuse one full-frame buffer
+        // instead of retaining four large-object allocations after every recognition.
+        var candidate = new byte[frame.Width * frame.Height];
         foreach (var channel in new[] { -1, 0, 1, 2 })
         {
-            var candidate = CreateContrastCandidate(frame, channel);
+            CreateContrastCandidate(frame, channel, candidate);
             DecodeCandidate(candidate, frame.Width, frame.Height, ImageFormat.Lum, frame.Width, 1, results);
         }
 
@@ -63,9 +66,11 @@ public static class QrCodeRecognitionService
         }
     }
 
-    private static byte[] CreateContrastCandidate(QrCaptureFrame frame, int channel)
+    private static void CreateContrastCandidate(QrCaptureFrame frame, int channel, byte[] candidate)
     {
-        var candidate = new byte[frame.Width * frame.Height];
+        if (candidate.Length < frame.Width * frame.Height)
+            throw new ArgumentException("The contrast buffer is smaller than the captured frame.", nameof(candidate));
+
         var histogram = new int[256];
         for (var y = 0; y < frame.Height; y++)
         {
@@ -88,14 +93,13 @@ public static class QrCodeRecognitionService
 
         var lower = Percentile(histogram, candidate.Length, 2);
         var upper = Percentile(histogram, candidate.Length, 98);
-        if (upper <= lower) return candidate;
+        if (upper <= lower) return;
 
         var scale = 255d / (upper - lower);
         for (var index = 0; index < candidate.Length; index++)
         {
             candidate[index] = (byte)Math.Clamp((int)Math.Round((candidate[index] - lower) * scale), 0, 255);
         }
-        return candidate;
     }
 
     private static int Percentile(IReadOnlyList<int> histogram, int total, int percentile)

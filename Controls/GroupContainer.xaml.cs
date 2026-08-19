@@ -28,11 +28,16 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     public static readonly DependencyProperty ViewIconSizeProperty = DependencyProperty.Register(
         nameof(ViewIconSize), typeof(double), typeof(GroupContainer), new PropertyMetadata(34.0));
     private readonly ResettableObservableCollection<FileEntry> _files = [];
-    private readonly IShellFileOperationService _shellFileOperations = new ShellFileOperationService();
-    private readonly FilePreviewService _filePreviewService = new();
-    private readonly DispatcherTimer _folderRefreshTimer;
-    private readonly DispatcherTimer _offlineRetryTimer;
-    private readonly DispatcherTimer _autoCollapseTimer;
+    private readonly DesktopSelectionState _selection = new();
+    private readonly Lazy<IShellFileOperationService> _shellFileOperations = new(
+        static () => new ShellFileOperationService());
+    // QuickLook discovery touches processes, registry and COM only when the
+    // user actually requests preview. Keep that provider out of cold startup.
+    private readonly Lazy<FilePreviewService> _filePreviewService = new(
+        static () => new FilePreviewService());
+    private DispatcherTimer? _folderRefreshTimer;
+    private DispatcherTimer? _offlineRetryTimer;
+    private DispatcherTimer? _autoCollapseTimer;
     private FileSystemWatcher? _watcher;
     private System.Windows.Point _dragStart;
     private System.Windows.Point _fileDragStart;
@@ -55,6 +60,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private bool _internalDragInProgress;
     private string[] _armedDragPaths = [];
     private string? _focusedEntryPath;
+    private bool _synchronizingSelection;
     private bool _boxSelecting;
     private Point _boxSelectionStart;
     private Point _tabDragStart;
@@ -69,8 +75,12 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private bool _folderRefreshRunning;
     private bool _folderRefreshPending;
     private int _folderRefreshVersion;
+    private bool _disposed;
     private bool _layoutMenuOpen;
     private bool _collapsedByAuto;
+    private System.Drawing.Point? _nativeLayoutMenuScreenPoint;
+    private readonly NativeDesktopSurface? _nativeSurface;
+    private NativeDesktopWindow? _nativeDesktopWindow;
 
     public GroupDefinition Definition { get; }
 
@@ -81,15 +91,17 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     public event Action<GroupKind>? CreateLayoutRequested;
     public event EventHandler<string>? StatusChanged;
     public event Action<Point>? HeaderDragCompleted;
+    public event EventHandler? UserInteraction;
 
     public bool IsInteractionBusy => _layoutMenuOpen || _isTransferring || _internalDragInProgress ||
         _boxSelecting || _isSizeTransitionActive || _tabRenameEditor is not null ||
-        TitleRenameBox.Visibility == Visibility.Visible || Mouse.LeftButton == MouseButtonState.Pressed;
+        (IsTopLevelNativePresentation ? false : TitleRenameBox.Visibility == Visibility.Visible) ||
+        Mouse.LeftButton == MouseButtonState.Pressed;
 
     public void SetEdgeHideMode(bool enabled)
     {
         _edgeHideMode = enabled;
-        if (enabled) _autoCollapseTimer.Stop();
+        if (enabled) _autoCollapseTimer?.Stop();
         else ScheduleAutoCollapse();
     }
     public event Action<LayoutTabDragPayload, Point>? TabDragStarted;
@@ -102,6 +114,81 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     public double ViewIconSize { get => (double)GetValue(ViewIconSizeProperty); set => SetValue(ViewIconSizeProperty, value); }
     public double CurrentHeaderHeight => Definition.HasMultipleTabs ? TabbedHeaderHeight : SingleHeaderHeight;
     public bool IsSizeTransitionActive => _isSizeTransitionActive;
+    public int FileEntryCount => _files.Count;
+    private bool IsTopLevelNativePresentation => DesktopRenderingOptions.UseNativeTopLevel;
+
+    /// <summary>Connects a standalone native top-level surface to the current
+    /// file model without allowing the surface to retain WPF item containers.</summary>
+    internal void BindNativeDesktopWindow(NativeDesktopWindow window)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+        if (ReferenceEquals(_nativeDesktopWindow, window)) return;
+        UnbindNativeDesktopWindow();
+        _nativeDesktopWindow = window;
+        window.ItemSelectionRequested += NativeDesktopWindow_ItemSelectionRequested;
+        window.ItemActivated += NativeDesktopWindow_ItemActivated;
+        window.NavigationRequested += NativeDesktopWindow_NavigationRequested;
+        window.ItemContextMenuRequested += NativeDesktopWindow_ItemContextMenuRequested;
+        window.DropRequested += NativeDesktopWindow_DropRequested;
+        window.TabActivated += NativeDesktopWindow_TabActivated;
+        window.RenameCommitted += NativeDesktopWindow_RenameCommitted;
+        window.ItemDragRequested += NativeDesktopWindow_ItemDragRequested;
+        window.LayoutMenuRequested += NativeDesktopWindow_LayoutMenuRequested;
+        window.BoundsChanged += NativeDesktopWindow_BoundsChanged;
+        window.InteractionRequested += NativeDesktopWindow_InteractionRequested;
+        window.Update(CreatePresentationSnapshot());
+    }
+
+    internal void UnbindNativeDesktopWindow()
+    {
+        if (_nativeDesktopWindow is null) return;
+        _nativeDesktopWindow.ItemSelectionRequested -= NativeDesktopWindow_ItemSelectionRequested;
+        _nativeDesktopWindow.ItemActivated -= NativeDesktopWindow_ItemActivated;
+        _nativeDesktopWindow.NavigationRequested -= NativeDesktopWindow_NavigationRequested;
+        _nativeDesktopWindow.ItemContextMenuRequested -= NativeDesktopWindow_ItemContextMenuRequested;
+        _nativeDesktopWindow.DropRequested -= NativeDesktopWindow_DropRequested;
+        _nativeDesktopWindow.TabActivated -= NativeDesktopWindow_TabActivated;
+        _nativeDesktopWindow.RenameCommitted -= NativeDesktopWindow_RenameCommitted;
+        _nativeDesktopWindow.ItemDragRequested -= NativeDesktopWindow_ItemDragRequested;
+        _nativeDesktopWindow.LayoutMenuRequested -= NativeDesktopWindow_LayoutMenuRequested;
+        _nativeDesktopWindow.BoundsChanged -= NativeDesktopWindow_BoundsChanged;
+        _nativeDesktopWindow.InteractionRequested -= NativeDesktopWindow_InteractionRequested;
+        _nativeDesktopWindow = null;
+    }
+
+    public DesktopPresentationSnapshot CreatePresentationSnapshot()
+    {
+        var selected = _selection.Paths;
+        var tabs = Definition.Tabs
+            .Select((tab, index) => new DesktopPresentationTab(tab.Id, tab.Title, index == Definition.ActiveTabIndex))
+            .ToArray();
+        var items = _files
+            .Select(entry => new DesktopPresentationItem(
+                entry.Name,
+                entry.FullPath,
+                entry.IsDirectory,
+                entry.TypeName,
+                entry.SizeText,
+                entry.ModifiedText,
+                selected.Contains(entry.FullPath)))
+            .ToArray();
+        return new DesktopPresentationSnapshot(
+            Definition.Id,
+            Definition.Title,
+            Definition.Kind,
+            Definition.ViewMode,
+            Definition.IsCollapsed,
+            Definition.ActiveTabIndex,
+            tabs,
+            items);
+    }
+
+    private void UpdateNativePresentation()
+    {
+        var snapshot = CreatePresentationSnapshot();
+        _nativeSurface?.Update(snapshot);
+        _nativeDesktopWindow?.Update(snapshot);
+    }
 
     public GroupContainer(
         GroupDefinition definition,
@@ -112,51 +199,64 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         double iconSize = 88,
         double animationSpeed = 1.0)
     {
-        InitializeComponent();
+        // Native top-level presentation keeps this object as a model/service
+        // bridge only. Avoid constructing the WPF visual tree, templates and
+        // item controls that are never shown in that mode.
+        if (!IsTopLevelNativePresentation)
+        {
+            (Application.Current as ZDesk.App)?.EnsureBaseResources();
+            InitializeComponent();
+        }
         Definition = definition;
+        if (DesktopRenderingOptions.UseNativeDesktop)
+        {
+            _nativeSurface = new NativeDesktopSurface();
+            _nativeSurface.ItemSelectionRequested += NativeSurface_ItemSelectionRequested;
+            _nativeSurface.ItemContextMenuRequested += NativeSurface_ItemContextMenuRequested;
+            _nativeSurface.ItemDragRequested += NativeSurface_ItemDragRequested;
+            _nativeSurface.DropRequested += NativeSurface_DropRequested;
+            _nativeSurface.NavigationRequested += NativeSurface_NavigationRequested;
+            _nativeSurface.ItemActivated += NativeSurface_ItemActivated;
+            _nativeSurface.RenameCommitted += NativeSurface_RenameCommitted;
+            Grid.SetRow(_nativeSurface, 1);
+            ContentPanel.Children.Add(_nativeSurface);
+            // Keep FileList as a model/selection bridge, but remove its visual
+            // tree so native mode does not allocate WPF item containers.
+            ContentPanel.Children.Remove(FileList);
+            ContentPanel.Children.Remove(DetailsHeader);
+        }
         _collapsedByAuto = definition.AutoCollapse && definition.IsCollapsed;
         _desktopHosted = desktopHosted;
         AnimationsEnabled = animationsEnabled;
-        RootBorder.Opacity = Math.Clamp(containerOpacity, 0.55, 1.0);
-        RootBorder.CornerRadius = new CornerRadius(Math.Clamp(cornerRadius, 0, 24));
+        if (!IsTopLevelNativePresentation)
+        {
+            RootBorder.Opacity = Math.Clamp(containerOpacity, 0.55, 1.0);
+            RootBorder.CornerRadius = new CornerRadius(Math.Clamp(cornerRadius, 0, 24));
+        }
         IconTileWidth = Math.Clamp(iconSize, 68, 112);
         AnimationSpeed = Math.Clamp(animationSpeed, 0.5, 2.0);
-        ApplyViewMode();
-        _folderRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(280) };
-        _folderRefreshTimer.Tick += FolderRefreshTimer_Tick;
-        _offlineRetryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
-        _offlineRetryTimer.Tick += (_, _) =>
-        {
-            if (Definition.FolderPath is not null && Directory.Exists(Definition.FolderPath))
-            {
-                _offlineRetryTimer.Stop();
-                LoadFolder();
-                StatusChanged?.Invoke(this, $"映射已恢复：{Definition.Title}");
-            }
-        };
-        _autoCollapseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(320) };
-        _autoCollapseTimer.Tick += (_, _) =>
-        {
-            _autoCollapseTimer.Stop();
-            if (!Definition.AutoCollapse || IsMouseOver) return;
-            if (!CanAutoCollapse())
-            {
-                _autoCollapseTimer.Start();
-                return;
-            }
-
-            _collapsedByAuto = true;
-            SetCollapsed(true, notifyLayoutChanged: false);
-        };
-        FileList.ItemsSource = _files;
-        ApplyDefinition();
+        if (!IsTopLevelNativePresentation) ApplyViewMode();
+        // The top-level native renderer consumes snapshots directly. Leaving
+        // this binding off prevents the detached ListBox from allocating a
+        // CollectionView and observing every file refresh.
+        if (!IsTopLevelNativePresentation) FileList.ItemsSource = _files;
+        _selection.Changed += Selection_Changed;
+        if (!IsTopLevelNativePresentation) ApplyDefinition();
         LoadFolder();
-        Loaded += (_, _) => ScheduleAutoCollapse();
+        UpdateNativePresentation();
+        if (!IsTopLevelNativePresentation) Loaded += (_, _) => ScheduleAutoCollapse();
     }
 
     public void ApplyAppearance(bool animationsEnabled, double containerOpacity, double cornerRadius, double iconSize, double animationSpeed)
     {
         AnimationsEnabled = animationsEnabled;
+        if (IsTopLevelNativePresentation)
+        {
+            IconTileWidth = Math.Clamp(iconSize, 68, 112);
+            AnimationSpeed = Math.Clamp(animationSpeed, 0.5, 2.0);
+            UpdateNativePresentation();
+            return;
+        }
         RootBorder.Opacity = Math.Clamp(containerOpacity, 0.55, 1.0);
         RootBorder.CornerRadius = new CornerRadius(Math.Clamp(cornerRadius, 0, 24));
         IconTileWidth = Math.Clamp(iconSize, 68, 112);
@@ -165,20 +265,253 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     }
 
     /// <summary>Updates title and other chrome without rebuilding the item list.</summary>
-    public void RefreshDefinitionChrome() => ApplyDefinition();
+    public void RefreshDefinitionChrome()
+    {
+        if (IsTopLevelNativePresentation)
+        {
+            UpdateNativePresentation();
+            return;
+        }
+        ApplyDefinition();
+    }
+
+    private void NativeSurface_ItemSelectionRequested(string path, bool controlKey, bool shiftKey)
+    {
+        var entry = _files.FirstOrDefault(item => string.Equals(item.FullPath, path, StringComparison.OrdinalIgnoreCase));
+        if (entry is null) return;
+        _selection.Select(path, controlKey, shiftKey, _files.Select(item => item.FullPath).ToArray());
+        // A true top-level native desktop window has detached the WPF visual
+        // tree. Focusing the hidden ListBox would recreate item containers and
+        // compositor state after every native selection.
+        if (_nativeDesktopWindow is null) FileList.Focus();
+        UserInteraction?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void NativeDesktopWindow_ItemSelectionRequested(string path, bool controlKey, bool shiftKey) =>
+        NativeSurface_ItemSelectionRequested(path, controlKey, shiftKey);
+
+    private void NativeDesktopWindow_ItemActivated(string path) => OpenPath(path);
+
+    private void NativeDesktopWindow_NavigationRequested(int key, bool controlKey, bool shiftKey) =>
+        NativeSurface_NavigationRequested(key, controlKey, shiftKey);
+
+    private void NativeDesktopWindow_ItemContextMenuRequested(string path, System.Drawing.Point screenPoint)
+    {
+        var entry = _files.FirstOrDefault(item => string.Equals(item.FullPath, path, StringComparison.OrdinalIgnoreCase));
+        if (entry is null || _nativeDesktopWindow is null) return;
+        _selection.Replace([entry.FullPath], entry.FullPath);
+        var paths = SelectedEntries().Select(item => item.FullPath).ToArray();
+        if (paths.Length == 0) return;
+        _layoutMenuOpen = true;
+        try { ShellContextMenuService.Show(_nativeDesktopWindow.Handle, paths, screenPoint.X, screenPoint.Y); }
+        finally { _layoutMenuOpen = false; ScheduleAutoCollapse(); }
+    }
+
+    private void NativeDesktopWindow_DropRequested(string[] paths, System.Drawing.Point screenPoint, bool copyRequested) =>
+        NativeSurface_DropRequested(paths, screenPoint, copyRequested);
+
+    private void NativeDesktopWindow_TabActivated(Guid tabId) => ActivateTab(tabId);
+
+    private async void NativeDesktopWindow_RenameCommitted(string path, string newName)
+    {
+        var entry = _files.FirstOrDefault(item => string.Equals(item.FullPath, path, StringComparison.OrdinalIgnoreCase));
+        if (entry is not null && !string.IsNullOrWhiteSpace(newName)) await RenameEntryAsync(entry, newName);
+    }
+
+    private void NativeDesktopWindow_ItemDragRequested(string path) => NativeSurface_ItemDragRequested(path);
+
+    private void NativeDesktopWindow_LayoutMenuRequested(System.Drawing.Point screenPoint)
+    {
+        _nativeLayoutMenuScreenPoint = screenPoint;
+        ShowLayoutMenu(default);
+    }
+
+    private void NativeDesktopWindow_BoundsChanged(object? sender, EventArgs e)
+    {
+        if (_nativeDesktopWindow is null) return;
+        var bounds = _nativeDesktopWindow.Bounds;
+        if (bounds.Width <= 0 || bounds.Height <= 0) return;
+        Definition.DesktopX = bounds.X;
+        Definition.DesktopY = bounds.Y;
+        Definition.Width = bounds.Width;
+        if (!Definition.IsCollapsed) Definition.Height = bounds.Height;
+        Definition.DisplayDeviceName = System.Windows.Forms.Screen
+            .FromHandle(_nativeDesktopWindow.Handle)
+            .DeviceName;
+        Definition.StoreActiveTab();
+        LayoutChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void NativeDesktopWindow_InteractionRequested(object? sender, EventArgs e) =>
+        UserInteraction?.Invoke(this, EventArgs.Empty);
+
+    private void NativeSurface_ItemContextMenuRequested(string path, System.Drawing.Point screenPoint)
+    {
+        var entry = _files.FirstOrDefault(item => string.Equals(item.FullPath, path, StringComparison.OrdinalIgnoreCase));
+        if (entry is null) return;
+        _selection.Replace([entry.FullPath], entry.FullPath);
+        var host = Window.GetWindow(this);
+        if (host is null) return;
+        var paths = SelectedEntries().Select(item => item.FullPath).ToArray();
+        if (paths.Length == 0) return;
+        var handle = new System.Windows.Interop.WindowInteropHelper(host).Handle;
+        _layoutMenuOpen = true;
+        try
+        {
+            ShellContextMenuService.Show(handle, paths, screenPoint.X, screenPoint.Y);
+        }
+        finally
+        {
+            _layoutMenuOpen = false;
+            ScheduleAutoCollapse();
+        }
+    }
+
+    private void NativeSurface_ItemDragRequested(string path)
+    {
+        var entry = _files.FirstOrDefault(item => string.Equals(item.FullPath, path, StringComparison.OrdinalIgnoreCase));
+        if (entry is null || _isTransferring) return;
+        _selection.Replace([entry.FullPath], entry.FullPath);
+        var paths = SelectedEntries().Select(item => item.FullPath).ToArray();
+        if (paths.Length == 0) return;
+        var data = new DataObject();
+        data.SetData(DataFormats.FileDrop, paths);
+        data.SetData(InternalDragFormat, new InternalDragPayload(Definition.Id, paths));
+        _internalDragInProgress = true;
+        try
+        {
+            System.Windows.DragDrop.DoDragDrop(_nativeSurface as UIElement ?? this, data, DragDropEffects.Move);
+        }
+        finally
+        {
+            _internalDragInProgress = false;
+        }
+    }
+
+    private async void NativeSurface_DropRequested(string[] paths, System.Drawing.Point screenPoint, bool copyRequested)
+    {
+        var existing = paths.Where(path => File.Exists(path) || Directory.Exists(path)).ToArray();
+        if (existing.Length == 0) return;
+        if (Definition.Kind == GroupKind.Empty)
+        {
+            foreach (var path in existing)
+                LayoutItemStateService.AddPinnedPath(Definition.PinnedPaths, Definition.ItemOrder, path);
+            SynchronizePinnedItems();
+            Definition.StoreActiveTab();
+            LayoutChanged?.Invoke(this, EventArgs.Empty);
+            StatusChanged?.Invoke(this, $"宸插皢 {existing.Length} 椤圭Щ鍏ュ竷灞€");
+            return;
+        }
+        if (Definition.FolderPath is null || _isTransferring) return;
+        _isTransferring = true;
+        try
+        {
+            var result = copyRequested
+                ? await _shellFileOperations.Value.CopyAsync(existing, Definition.FolderPath, GetOwnerHandle())
+                : await _shellFileOperations.Value.MoveAsync(existing, Definition.FolderPath, GetOwnerHandle());
+            StatusChanged?.Invoke(this, result.Succeeded
+                ? $"{(copyRequested ? "Copied" : "Moved")} {existing.Length} item(s)"
+                : $"File operation failed: {result.ErrorMessage}");
+            if (result.Succeeded) await ReconcileFolderItemsAsync();
+        }
+        finally { _isTransferring = false; }
+    }
+
+    private void NativeSurface_ItemActivated(string path) => OpenPath(path);
+
+    private async void NativeSurface_RenameCommitted(string path, string newName)
+    {
+        var entry = _files.FirstOrDefault(item => string.Equals(item.FullPath, path, StringComparison.OrdinalIgnoreCase));
+        if (entry is not null && !string.IsNullOrWhiteSpace(newName))
+            await RenameEntryAsync(entry, newName);
+    }
+
+    private void NativeSurface_NavigationRequested(int key, bool controlKey, bool shiftKey)
+    {
+        if (controlKey && key == 0x41)
+        {
+            _selection.Replace(_files.Select(entry => entry.FullPath), _focusedEntryPath);
+            UpdateNativePresentation();
+            return;
+        }
+        if (key == 0x20)
+        {
+            var preview = FilePreviewService.SelectPreviewEntry(SelectedEntries(), _focusedEntryPath);
+            if (preview is not null) _ = TryPreviewAsync(preview);
+            return;
+        }
+        if (controlKey && shiftKey && key is >= 0x31 and <= 0x38)
+        {
+            SetViewMode((LayoutViewMode)(key - 0x30));
+            return;
+        }
+        if (key == 0x71 && SelectedEntries() is [var renameEntry])
+        {
+            if (_nativeSurface is not null) _nativeSurface.BeginRename(renameEntry.FullPath);
+            else StartInlineRename(renameEntry);
+            return;
+        }
+        if (key == 0x2E && SelectedEntries().Length > 0)
+        {
+            ContextDelete_Click(this, new RoutedEventArgs());
+            return;
+        }
+        if (_files.Count == 0) return;
+        var current = FocusedSelectedEntry();
+        var index = current is null ? 0 : Math.Max(0, _files.IndexOf(current));
+        index = key switch
+        {
+            0x26 => Math.Max(0, index - 1),
+            0x28 => Math.Min(_files.Count - 1, index + 1),
+            0x21 => Math.Max(0, index - 10),
+            0x22 => Math.Min(_files.Count - 1, index + 10),
+            0x24 => 0,
+            0x23 => _files.Count - 1,
+            0x0D when current is not null => -1,
+            _ => index
+        };
+        if (index < 0)
+        {
+            OpenPath(current?.FullPath);
+            return;
+        }
+        _selection.Replace([_files[index].FullPath], _files[index].FullPath);
+        UpdateNativePresentation();
+        UserInteraction?.Invoke(this, EventArgs.Empty);
+    }
 
     public void Dispose()
     {
-        _folderRefreshTimer.Stop();
-        _offlineRetryTimer.Stop();
-        _autoCollapseTimer.Stop();
+        if (_disposed) return;
+        _disposed = true;
+        unchecked { _folderRefreshVersion++; }
+        _folderRefreshTimer?.Stop();
+        _offlineRetryTimer?.Stop();
+        _autoCollapseTimer?.Stop();
         _watcher?.Dispose();
         _watcher = null;
         DisposeFileEntries();
+        if (_nativeSurface is not null)
+        {
+            _nativeSurface.ItemSelectionRequested -= NativeSurface_ItemSelectionRequested;
+            _nativeSurface.ItemContextMenuRequested -= NativeSurface_ItemContextMenuRequested;
+            _nativeSurface.ItemDragRequested -= NativeSurface_ItemDragRequested;
+            _nativeSurface.DropRequested -= NativeSurface_DropRequested;
+            _nativeSurface.NavigationRequested -= NativeSurface_NavigationRequested;
+            _nativeSurface.ItemActivated -= NativeSurface_ItemActivated;
+            _nativeSurface.RenameCommitted -= NativeSurface_RenameCommitted;
+        }
+        _selection.Changed -= Selection_Changed;
+        UnbindNativeDesktopWindow();
     }
 
     private void ApplyDefinition()
     {
+        if (IsTopLevelNativePresentation)
+        {
+            UpdateNativePresentation();
+            return;
+        }
         if (_desktopHosted)
         {
             Width = double.NaN;
@@ -240,6 +573,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void ApplyViewMode()
     {
+        if (IsTopLevelNativePresentation) return;
         var (templateKey, panelKey, itemWidth, itemHeight, iconSize) = Definition.ViewMode switch
         {
             LayoutViewMode.ExtraLargeIcons => ("IconFileTemplate", "WrapFileItemsPanel", 132d, 116d, 64d),
@@ -267,7 +601,28 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private void FileItem_Loaded(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: FileEntry entry })
-            entry.EnsureVisibleDataLoaded();
+        {
+            entry.EnsureIconLoadedOnly();
+            if (Definition.ViewMode is LayoutViewMode.Details or LayoutViewMode.Tiles or LayoutViewMode.Content ||
+                Definition.SortProperty is LayoutSortProperty.Modified or LayoutSortProperty.Type or LayoutSortProperty.Size)
+                entry.EnsureMetadataLoadedOnly();
+        }
+    }
+
+    private void FileItem_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: FileEntry entry })
+            entry.ReleaseVisibleIcon();
+    }
+
+    private void EnsureVisibleMetadataForCurrentView()
+    {
+        if (Definition.ViewMode is not (LayoutViewMode.Details or LayoutViewMode.Tiles or LayoutViewMode.Content)) return;
+        for (var index = 0; index < _files.Count; index++)
+        {
+            if (FileList.ItemContainerGenerator.ContainerFromIndex(index) is not null)
+                _files[index].EnsureMetadataLoadedOnly();
+        }
     }
 
     private void SetViewMode(LayoutViewMode mode)
@@ -276,6 +631,8 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         Definition.ViewMode = mode;
         Definition.StoreActiveTab();
         ApplyViewMode();
+        Dispatcher.BeginInvoke(EnsureVisibleMetadataForCurrentView, DispatcherPriority.Loaded);
+        UpdateNativePresentation();
         LayoutChanged?.Invoke(this, EventArgs.Empty);
         StatusChanged?.Invoke(this, $"视图已切换为：{ViewModeLabel(mode)}");
     }
@@ -361,8 +718,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         var selectedPaths = SelectedEntries().Select(entry => entry.FullPath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         ApplyEntryOrder(sorted);
-        foreach (var entry in sorted.Where(entry => selectedPaths.Contains(entry.FullPath)))
-            FileList.SelectedItems.Add(entry);
+        _selection.Replace(selectedPaths, _selection.FocusedPath);
 
         PersistCurrentOrder();
         Definition.StoreActiveTab();
@@ -484,8 +840,11 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         {
             LayoutItemStateService.Normalize(Definition.PinnedPaths, Definition.ItemOrder);
             SynchronizePinnedItems();
-            EmptyMessage.Text = _files.Count == 0 ? "将文件或文件夹拖到这里固定引用" : string.Empty;
-            EmptyMessagePanel.Visibility = Visibility.Collapsed;
+            if (!IsTopLevelNativePresentation)
+            {
+                EmptyMessage.Text = _files.Count == 0 ? "将文件或文件夹拖到这里固定引用" : string.Empty;
+                EmptyMessagePanel.Visibility = Visibility.Collapsed;
+            }
             QueueSavedSort();
             return;
         }
@@ -495,13 +854,16 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         {
             DisposeFileEntries();
             _folderSignature = string.Empty;
-            EmptyMessage.Text = "映射目录当前不可用";
-            EmptyMessagePanel.Visibility = Visibility.Visible;
-            _offlineRetryTimer.Start();
+            if (!IsTopLevelNativePresentation)
+            {
+                EmptyMessage.Text = "映射目录当前不可用";
+                EmptyMessagePanel.Visibility = Visibility.Visible;
+            }
+            EnsureOfflineRetryTimer().Start();
             return;
         }
 
-        _offlineRetryTimer.Stop();
+        _offlineRetryTimer?.Stop();
 
         try
         {
@@ -511,8 +873,11 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             PersistCurrentOrder();
             QueueSavedSort();
 
-            EmptyMessage.Text = _files.Count == 0 ? "这个文件夹是空的" : string.Empty;
-            EmptyMessagePanel.Visibility = Visibility.Collapsed;
+            if (!IsTopLevelNativePresentation)
+            {
+                EmptyMessage.Text = _files.Count == 0 ? "这个文件夹是空的" : string.Empty;
+                EmptyMessagePanel.Visibility = Visibility.Collapsed;
+            }
 
             _watcher = new FileSystemWatcher(folder)
             {
@@ -526,13 +891,19 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         }
         catch (UnauthorizedAccessException)
         {
-            EmptyMessage.Text = "没有权限读取这个文件夹";
-            EmptyMessagePanel.Visibility = Visibility.Visible;
+            if (!IsTopLevelNativePresentation)
+            {
+                EmptyMessage.Text = "没有权限读取这个文件夹";
+                EmptyMessagePanel.Visibility = Visibility.Visible;
+            }
         }
         catch (IOException)
         {
-            EmptyMessage.Text = "读取文件夹时发生错误";
-            EmptyMessagePanel.Visibility = Visibility.Visible;
+            if (!IsTopLevelNativePresentation)
+            {
+                EmptyMessage.Text = "读取文件夹时发生错误";
+                EmptyMessagePanel.Visibility = Visibility.Visible;
+            }
         }
     }
 
@@ -541,9 +912,11 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         if (Definition.Kind == GroupKind.Empty)
         {
             SynchronizePinnedItems();
+            UpdateNativePresentation();
             return;
         }
         LoadFolder();
+        UpdateNativePresentation();
     }
 
     public void ApplyDesktopFileChanges(IReadOnlyList<DesktopFileChange> changes)
@@ -567,6 +940,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         }
 
         SynchronizePinnedItems(selected);
+        UpdateNativePresentation();
     }
 
     private void SynchronizePinnedItems(HashSet<string>? selected = null)
@@ -595,10 +969,9 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         foreach (var entry in existing.Values.Where(entry => !desiredEntrySet.Contains(entry))) entry.Dispose();
         _files.ReplaceAll(desiredEntries);
 
-        FileList.SelectedItems.Clear();
-        foreach (var entry in _files.Where(entry => selected.Contains(entry.FullPath)))
-            FileList.SelectedItems.Add(entry);
-        EmptyMessage.Text = _files.Count == 0 ? "将文件或文件夹拖到这里固定引用" : string.Empty;
+        _selection.Replace(selected, _selection.FocusedPath);
+        if (!IsTopLevelNativePresentation)
+            EmptyMessage.Text = _files.Count == 0 ? "将文件或文件夹拖到这里固定引用" : string.Empty;
         if (Definition.SortProperty != LayoutSortProperty.Manual) _ = SortCurrentItemsAsync(notify: false);
     }
 
@@ -664,6 +1037,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void Folder_Changed(object sender, FileSystemEventArgs e)
     {
+        EnsureFolderRefreshTimer();
         _pendingFolderChangeDetail = $"{e.ChangeType}:{e.FullPath}";
         lock (_pendingFolderChangePaths)
         {
@@ -672,14 +1046,15 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         }
         Dispatcher.BeginInvoke(() =>
         {
-            _folderRefreshTimer.Stop();
-            _folderRefreshTimer.Start();
+            _folderRefreshTimer?.Stop();
+            _folderRefreshTimer?.Start();
         }, DispatcherPriority.Background);
     }
 
     private async void FolderRefreshTimer_Tick(object? sender, EventArgs e)
     {
-        _folderRefreshTimer.Stop();
+        if (_disposed) return;
+        _folderRefreshTimer?.Stop();
         if (_folderRefreshRunning)
         {
             _folderRefreshPending = true;
@@ -698,7 +1073,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
             var version = ++_folderRefreshVersion;
             var snapshot = await Task.Run(() => CaptureFolderSnapshot(folder));
-            if (version != _folderRefreshVersion || snapshot is null) return;
+            if (_disposed || version != _folderRefreshVersion || snapshot is null) return;
             if (!string.Equals(_folderSignature, snapshot.Signature, StringComparison.Ordinal))
                 await ReconcileFolderItemsAsync(snapshot.Paths, snapshot.Signature);
         }
@@ -712,9 +1087,30 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             if (_folderRefreshPending)
             {
                 _folderRefreshPending = false;
-                _folderRefreshTimer.Start();
+                _folderRefreshTimer?.Start();
             }
         }
+    }
+
+    private void EnsureFolderRefreshTimer()
+    {
+        if (_folderRefreshTimer is not null) return;
+        _folderRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(280) };
+        _folderRefreshTimer.Tick += FolderRefreshTimer_Tick;
+    }
+
+    private DispatcherTimer EnsureOfflineRetryTimer()
+    {
+        if (_offlineRetryTimer is not null) return _offlineRetryTimer;
+        _offlineRetryTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
+        _offlineRetryTimer.Tick += (_, _) =>
+        {
+            if (_disposed || Definition.FolderPath is null || !Directory.Exists(Definition.FolderPath)) return;
+            _offlineRetryTimer.Stop();
+            LoadFolder();
+            StatusChanged?.Invoke(this, $"映射已恢复：{Definition.Title}");
+        };
+        return _offlineRetryTimer;
     }
 
     private bool FolderSnapshotChanged()
@@ -757,6 +1153,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private async Task ReconcileFolderItemsAsync(IReadOnlyList<string>? snapshotPaths = null, string? snapshotSignature = null)
     {
+        if (_disposed) return;
         if (Definition.Kind != GroupKind.Folder || string.IsNullOrWhiteSpace(Definition.FolderPath) ||
             !Directory.Exists(Definition.FolderPath))
         {
@@ -769,7 +1166,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             var snapshot = snapshotPaths is null
                 ? await Task.Run(() => CaptureFolderSnapshot(Definition.FolderPath!))
                 : new FolderSnapshot(snapshotPaths.ToArray(), snapshotSignature ?? BuildFolderSignature(snapshotPaths));
-            if (snapshot is null) return;
+            if (_disposed || snapshot is null) return;
             var paths = snapshot.Paths;
             HashSet<string> changed;
             lock (_pendingFolderChangePaths)
@@ -782,16 +1179,14 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             ApplyFolderPaths(paths, changed);
 
-            FileList.SelectedItems.Clear();
-            foreach (var entry in _files.Where(entry => selected.Contains(entry.FullPath)))
-                FileList.SelectedItems.Add(entry);
+            _selection.Replace(selected, _selection.FocusedPath);
 
             _folderSignature = snapshot.Signature;
             PersistCurrentOrder();
             Definition.StoreActiveTab();
             if (Definition.SortProperty != LayoutSortProperty.Manual)
                 await SortCurrentItemsAsync(notify: false);
-            EmptyMessagePanel.Visibility = Visibility.Collapsed;
+            if (!IsTopLevelNativePresentation) EmptyMessagePanel.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -1057,7 +1452,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void Group_MouseEnter(object sender, MouseEventArgs e)
     {
-        _autoCollapseTimer.Stop();
+        _autoCollapseTimer?.Stop();
         if (!Definition.AutoCollapse || !Definition.IsCollapsed) return;
         _collapsedByAuto = false;
         SetCollapsed(false, notifyLayoutChanged: false);
@@ -1067,8 +1462,28 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void ScheduleAutoCollapse()
     {
-        _autoCollapseTimer.Stop();
-        if (!_edgeHideMode && Definition.AutoCollapse && !IsMouseOver) _autoCollapseTimer.Start();
+        _autoCollapseTimer?.Stop();
+        if (!_edgeHideMode && Definition.AutoCollapse && !IsMouseOver) EnsureAutoCollapseTimer().Start();
+    }
+
+    private DispatcherTimer EnsureAutoCollapseTimer()
+    {
+        if (_autoCollapseTimer is not null) return _autoCollapseTimer;
+        _autoCollapseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(320) };
+        _autoCollapseTimer.Tick += (_, _) =>
+        {
+            _autoCollapseTimer.Stop();
+            if (!Definition.AutoCollapse || IsMouseOver) return;
+            if (!CanAutoCollapse())
+            {
+                _autoCollapseTimer.Start();
+                return;
+            }
+
+            _collapsedByAuto = true;
+            SetCollapsed(true, notifyLayoutChanged: false);
+        };
+        return _autoCollapseTimer;
     }
 
     private bool CanAutoCollapse() =>
@@ -1198,6 +1613,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         var itemContainer = ItemsControl.ContainerFromElement(FileList, e.OriginalSource as DependencyObject) as ListBoxItem;
         if (itemContainer?.DataContext is FileEntry focusedEntry) _focusedEntryPath = focusedEntry.FullPath;
         _fileDragArmed = itemContainer is not null;
+        if (_fileDragArmed) SetMouseSelectionActive(true);
         _armedDragPaths = itemContainer?.IsSelected == true && FileList.SelectedItems.Count > 1
             ? SelectedEntries().Select(entry => entry.FullPath).ToArray()
             : [];
@@ -1209,23 +1625,41 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             FileList.SelectedItems.Clear();
             FileList.CaptureMouse();
             e.Handled = true;
+            Dispatcher.BeginInvoke(FileList.Focus, DispatcherPriority.Input);
         }
-        Dispatcher.BeginInvoke(() =>
-        {
-            FileList.Focus();
-        }, DispatcherPriority.Input);
     }
 
     private void FileList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
+        UserInteraction?.Invoke(this, EventArgs.Empty);
+        var wasItemMouseSelection = _fileDragArmed;
         _fileDragArmed = false;
         _armedDragPaths = [];
+        if (wasItemMouseSelection) SetMouseSelectionActive(false);
         if (!_boxSelecting) return;
         _boxSelecting = false;
         IconSelectionRectangle.Visibility = Visibility.Collapsed;
         FileList.ReleaseMouseCapture();
         FileList.Focus();
         e.Handled = true;
+    }
+
+    private void SetMouseSelectionActive(bool active)
+    {
+        if (FindVisualChild<VirtualizingWrapPanel>(FileList) is not { } panel) return;
+        if (active) panel.BeginMouseSelection();
+        else panel.EndMouseSelectionAfterInput();
+    }
+
+    private static T? FindVisualChild<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(root); index++)
+        {
+            var child = VisualTreeHelper.GetChild(root, index);
+            if (child is T match) return match;
+            if (FindVisualChild<T>(child) is { } descendant) return descendant;
+        }
+        return null;
     }
     private void FileList_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e) => _fileDragArmed = false;
 
@@ -1269,6 +1703,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             return;
         }
         LogService.Info($"Drag start | group={Definition.Title} | count={paths.Length} | paths={string.Join(",", paths.Select(Path.GetFileName))}");
+        SetMouseSelectionActive(false);
 
         var data = new DataObject();
         data.SetData(DataFormats.FileDrop, paths);
@@ -1373,8 +1808,8 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         {
             var effect = GetShellDropEffect(e);
             var result = effect == DragDropEffects.Copy
-                ? await _shellFileOperations.CopyAsync(paths, Definition.FolderPath, GetOwnerHandle())
-                : await _shellFileOperations.MoveAsync(paths, Definition.FolderPath, GetOwnerHandle());
+                ? await _shellFileOperations.Value.CopyAsync(paths, Definition.FolderPath, GetOwnerHandle())
+                : await _shellFileOperations.Value.MoveAsync(paths, Definition.FolderPath, GetOwnerHandle());
             StatusChanged?.Invoke(this, result.Aborted ? "文件移动已取消" :
                 result.Succeeded ? $"已{(effect == DragDropEffects.Copy ? "复制" : "移动")} {paths.Length} 项" :
                 $"文件操作失败：{result.ErrorMessage}");
@@ -1454,6 +1889,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void FileList_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        UserInteraction?.Invoke(this, EventArgs.Empty);
         if (Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift) &&
             TryGetViewModeShortcut(e.Key, out var viewMode))
         {
@@ -1483,7 +1919,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         {
             var previewEntry = FilePreviewService.SelectPreviewEntry(SelectedEntries(), _focusedEntryPath);
             if (previewEntry is null) return;
-            _ = _filePreviewService.TryPreviewAsync(previewEntry.FullPath);
+            _ = TryPreviewAsync(previewEntry);
             e.Handled = true;
             return;
         }
@@ -1496,6 +1932,20 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         if (e.Key != Key.Delete) return;
         ContextDelete_Click(sender, e);
         e.Handled = true;
+    }
+
+    private async Task TryPreviewAsync(FileEntry entry)
+    {
+        try
+        {
+            if (!await _filePreviewService.Value.TryPreviewAsync(entry.FullPath))
+                StatusChanged?.Invoke(this, $"无法预览：{entry.Name}");
+        }
+        catch (Exception ex)
+        {
+            LogService.Warning($"Preview request failed for {entry.Name}", ex);
+            StatusChanged?.Invoke(this, $"预览失败：{entry.Name}");
+        }
     }
 
     private static bool TryGetViewModeShortcut(Key key, out LayoutViewMode mode)
@@ -1515,7 +1965,30 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         return key is >= Key.D1 and <= Key.D8 or >= Key.NumPad1 and <= Key.NumPad8;
     }
 
-    private FileEntry[] SelectedEntries() => FileList.SelectedItems.OfType<FileEntry>().ToArray();
+    private FileEntry[] SelectedEntries() => _files
+        .Where(entry => _selection.Paths.Contains(entry.FullPath))
+        .ToArray();
+
+    private void Selection_Changed(object? sender, EventArgs e)
+    {
+        if (!IsTopLevelNativePresentation && _nativeDesktopWindow is null)
+        {
+            _synchronizingSelection = true;
+            try
+            {
+                FileList.SelectedItems.Clear();
+                foreach (var entry in _files.Where(entry => _selection.Paths.Contains(entry.FullPath)))
+                    FileList.SelectedItems.Add(entry);
+            }
+            finally
+            {
+                _synchronizingSelection = false;
+            }
+        }
+
+        _focusedEntryPath = _selection.FocusedPath;
+        UpdateNativePresentation();
+    }
 
     private FileEntry? FocusedSelectedEntry()
     {
@@ -1548,12 +2021,22 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void FileList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_synchronizingSelection) return;
         if (e.AddedItems.OfType<FileEntry>().LastOrDefault() is { } added &&
             (string.IsNullOrWhiteSpace(_focusedEntryPath) ||
              !SelectedEntries().Any(entry => string.Equals(entry.FullPath, _focusedEntryPath, StringComparison.OrdinalIgnoreCase))))
         {
             _focusedEntryPath = added.FullPath;
         }
+        _selection.Replace(
+            FileList.SelectedItems.OfType<FileEntry>().Select(entry => entry.FullPath),
+            _focusedEntryPath);
+    }
+
+    private void FileList_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (Math.Abs(e.VerticalChange) > 0.01 || Math.Abs(e.HorizontalChange) > 0.01)
+            UserInteraction?.Invoke(this, EventArgs.Empty);
     }
 
     private void FileList_PreviewMouseRightButtonUp(object sender, MouseButtonEventArgs e)
@@ -1604,6 +2087,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         menu.Closed += (_, _) =>
         {
             _layoutMenuOpen = false;
+            _nativeLayoutMenuScreenPoint = null;
             ScheduleAutoCollapse();
         };
         AddViewMenu(menu);
@@ -1667,14 +2151,14 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private void ShowMappedFolderShellMenu(Point position)
     {
         if (string.IsNullOrWhiteSpace(Definition.FolderPath)) return;
-        var host = Window.GetWindow(this);
-        var handle = host is null ? nint.Zero : new System.Windows.Interop.WindowInteropHelper(host).Handle;
+        var handle = GetOwnerHandle();
         if (handle == nint.Zero) return;
-        var screen = PointToScreen(position);
+        var screen = _nativeLayoutMenuScreenPoint ??
+            new System.Drawing.Point((int)PointToScreen(position).X, (int)PointToScreen(position).Y);
         _layoutMenuOpen = true;
         try
         {
-            ShellContextMenuService.Show(handle, [Definition.FolderPath], (int)screen.X, (int)screen.Y);
+            ShellContextMenuService.Show(handle, [Definition.FolderPath], screen.X, screen.Y);
         }
         finally
         {
@@ -1886,8 +2370,8 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         var paths = Clipboard.GetFileDropList().Cast<string>().ToArray();
         var move = ClipboardPrefersMove();
         var result = move
-            ? await _shellFileOperations.MoveAsync(paths, Definition.FolderPath, GetOwnerHandle())
-            : await _shellFileOperations.CopyAsync(paths, Definition.FolderPath, GetOwnerHandle());
+            ? await _shellFileOperations.Value.MoveAsync(paths, Definition.FolderPath, GetOwnerHandle())
+            : await _shellFileOperations.Value.CopyAsync(paths, Definition.FolderPath, GetOwnerHandle());
         StatusChanged?.Invoke(this, result.Aborted ? "粘贴已取消" :
             result.Succeeded ? $"已{(move ? "移动" : "复制")} {paths.Length} 项" : $"粘贴失败：{result.ErrorMessage}");
         if (result.Succeeded)
@@ -1972,7 +2456,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         {
             newName += extension;
         }
-        var result = await _shellFileOperations.RenameAsync(entry.FullPath, newName, GetOwnerHandle());
+        var result = await _shellFileOperations.Value.RenameAsync(entry.FullPath, newName, GetOwnerHandle());
         if (result.Succeeded)
         {
             var destination = result.ResultPaths?.FirstOrDefault() ??
@@ -1992,8 +2476,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             {
                 var replacement = CreateEntry(destination);
                 _files[itemIndex] = replacement;
-                FileList.SelectedItem = replacement;
-                _focusedEntryPath = destination;
+                _selection.Replace([destination], destination);
             }
             Definition.StoreActiveTab();
             RefreshFolderSignature();
@@ -2026,7 +2509,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     {
         var entries = SelectedEntries();
         if (entries.Length == 0) return;
-        var result = await _shellFileOperations.DeleteAsync(
+        var result = await _shellFileOperations.Value.DeleteAsync(
             entries.Select(entry => entry.FullPath).ToArray(), GetOwnerHandle());
         if (!result.Succeeded) return;
         var removed = entries.Select(entry => entry.FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -2036,7 +2519,8 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         }
         Definition.ItemOrder.RemoveAll(path => removed.Contains(path));
         foreach (var entry in entries) _files.Remove(entry);
-        if (_focusedEntryPath is not null && removed.Contains(_focusedEntryPath)) _focusedEntryPath = null;
+        _selection.Replace(_selection.Paths.Where(path => !removed.Contains(path)),
+            _selection.FocusedPath is not null && removed.Contains(_selection.FocusedPath) ? null : _selection.FocusedPath);
         Definition.StoreActiveTab();
         RefreshFolderSignature();
         LayoutChanged?.Invoke(this, EventArgs.Empty);
@@ -2044,6 +2528,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private nint GetOwnerHandle()
     {
+        if (_nativeDesktopWindow is { Handle: not 0 } nativeWindow) return nativeWindow.Handle;
         var owner = Window.GetWindow(this);
         return owner is null ? nint.Zero : new System.Windows.Interop.WindowInteropHelper(owner).Handle;
     }
@@ -2086,7 +2571,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void FileList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FileList.SelectedItem is FileEntry entry)
+        if (FocusedSelectedEntry() is { } entry)
         {
             OpenPath(entry.FullPath);
         }

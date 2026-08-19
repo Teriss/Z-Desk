@@ -120,10 +120,14 @@ public sealed class QrRecognitionFrameController : IDisposable
 
     private void FrameWindow_RecognizeRequested()
     {
+        if (_disposing) return;
         SaveBounds(_frameBounds);
         HideForCapture();
         var bounds = _frameBounds;
-        _owner.Dispatcher.BeginInvoke(new Action(() => RecognitionRequested?.Invoke(bounds)), DispatcherPriority.Render);
+        _owner.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!_disposing) RecognitionRequested?.Invoke(bounds);
+        }), DispatcherPriority.Render);
     }
 
     private void ApplyLayout(bool forceResize = false)

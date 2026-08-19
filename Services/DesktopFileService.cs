@@ -8,6 +8,7 @@ public sealed class DesktopFileService : IDisposable
     private readonly List<FileSystemWatcher> _watchers = [];
     private readonly Dictionary<string, DesktopFileChange> _pendingChanges = new(StringComparer.OrdinalIgnoreCase);
     private bool _fullRefreshPending;
+    private bool _disposed;
     private readonly DispatcherTimer _refreshTimer;
     public string UserDesktop { get; } = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
     public string CommonDesktop { get; } = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
@@ -21,6 +22,7 @@ public sealed class DesktopFileService : IDisposable
         };
         _refreshTimer.Tick += (_, _) =>
         {
+            if (_disposed) return;
             _refreshTimer.Stop();
             DesktopFileChange[] changes;
             bool fullRefresh;
@@ -54,9 +56,11 @@ public sealed class DesktopFileService : IDisposable
 
     public void RequestFullRefresh()
     {
+        if (_disposed) return;
         lock (_pendingChanges) _fullRefreshPending = true;
         _ = _refreshTimer.Dispatcher.BeginInvoke(() =>
         {
+            if (_disposed) return;
             _refreshTimer.Stop();
             _refreshTimer.Start();
         });
@@ -64,7 +68,14 @@ public sealed class DesktopFileService : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
         _refreshTimer.Stop();
+        lock (_pendingChanges)
+        {
+            _pendingChanges.Clear();
+            _fullRefreshPending = false;
+        }
         foreach (var watcher in _watchers) watcher.Dispose();
         _watchers.Clear();
     }
@@ -105,12 +116,14 @@ public sealed class DesktopFileService : IDisposable
 
     private void OnChanged(object sender, FileSystemEventArgs e)
     {
+        if (_disposed) return;
         var change = e is RenamedEventArgs renamed
             ? new DesktopFileChange(WatcherChangeTypes.Renamed, renamed.FullPath, renamed.OldFullPath)
             : new DesktopFileChange(e.ChangeType, e.FullPath);
         lock (_pendingChanges) _pendingChanges[change.FullPath] = change;
         _ = _refreshTimer.Dispatcher.BeginInvoke(() =>
         {
+            if (_disposed) return;
             _refreshTimer.Stop();
             _refreshTimer.Start();
         });

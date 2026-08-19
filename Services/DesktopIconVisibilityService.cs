@@ -71,6 +71,8 @@ public sealed class DesktopIconVisibilityService : IDisposable
 
     private static void StartWatchdog()
     {
+        if (NativeWatchdogLauncher.TryStart(Environment.ProcessId)) return;
+
         var executable = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(executable)) return;
         Process.Start(new ProcessStartInfo

@@ -205,8 +205,8 @@ public partial class QrRecognitionFrameWindow : Window
         if (y < _headerHeightPixels) return true;
         var cx = x;
         var cy = y - _headerHeightPixels;
-        const int edgePixels = 12;
-        const int cornerPixels = 18;
+        const int edgePixels = 24;
+        const int cornerPixels = 36;
         return cx < edgePixels || cy < edgePixels || cx >= _captureBounds.Width - edgePixels || cy >= _captureBounds.Height - edgePixels ||
             (cx < cornerPixels && cy < cornerPixels) ||
             (cx >= _captureBounds.Width - cornerPixels && cy < cornerPixels) ||

@@ -145,6 +145,7 @@ public sealed class QrSelectionController : IDisposable
             overlay.ExitRequested -= Overlay_ExitRequested;
             overlay.PointerCaptureLost -= Overlay_PointerCaptureLost;
             overlay.Closed -= Overlay_Closed;
+            overlay.ReleaseSnapshot();
             overlay.Close();
         }
         _overlays.Clear();

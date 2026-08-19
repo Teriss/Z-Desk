@@ -6,7 +6,11 @@ namespace ZDesk.Windows;
 public partial class ConflictWindow : Window
 {
     public FileConflictStrategy Strategy { get; private set; } = FileConflictStrategy.Rename;
-    public ConflictWindow() => InitializeComponent();
+    public ConflictWindow()
+    {
+        (Application.Current as ZDesk.App)?.EnsureBaseResources();
+        InitializeComponent();
+    }
     private void Continue_Click(object sender, RoutedEventArgs e)
     {
         Strategy = OverwriteRadio.IsChecked == true

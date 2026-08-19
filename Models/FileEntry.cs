@@ -20,6 +20,7 @@ public sealed class FileEntry : INotifyPropertyChanged
     private readonly CancellationTokenSource _lifetime = new();
     private Task? _metadataLoadTask;
     private Task? _iconLoadTask;
+    private int _iconLoadGeneration;
 
     public string Name { get; }
     public string FullPath { get; }
@@ -57,11 +58,26 @@ public sealed class FileEntry : INotifyPropertyChanged
         _ = EnsureMetadataLoaded();
     }
 
+    public void EnsureIconLoadedOnly() => _ = EnsureIconLoaded();
+
+    public void EnsureMetadataLoadedOnly() => _ = EnsureMetadataLoaded();
+
+    /// <summary>Releases the per-item WPF image reference when a recycled
+    /// virtualized container leaves the viewport. The shared Shell cache may
+    /// still serve the image when the item becomes visible again.</summary>
+    public void ReleaseVisibleIcon()
+    {
+        Interlocked.Increment(ref _iconLoadGeneration);
+        IconSource = null;
+        Interlocked.Exchange(ref _iconLoadTask, null);
+    }
+
     private Task EnsureIconLoaded()
     {
         var task = Volatile.Read(ref _iconLoadTask);
         if (task is not null) return task;
-        var created = StartIconLoadAsync();
+        var generation = Volatile.Read(ref _iconLoadGeneration);
+        var created = StartIconLoadAsync(generation);
         return Interlocked.CompareExchange(ref _iconLoadTask, created, null) ?? created;
     }
 
@@ -155,7 +171,7 @@ public sealed class FileEntry : INotifyPropertyChanged
         return unit == 0 ? $"{bytes} B" : $"{value:0.#} {units[unit]}";
     }
 
-    private async Task StartIconLoadAsync()
+    private async Task StartIconLoadAsync(int generation)
     {
         try
         {
@@ -173,12 +189,13 @@ public sealed class FileEntry : INotifyPropertyChanged
             {
                 await dispatcher.InvokeAsync(() =>
                 {
-                    if (!_lifetime.IsCancellationRequested) IconSource = icon;
+                    if (!_lifetime.IsCancellationRequested && generation == Volatile.Read(ref _iconLoadGeneration))
+                        IconSource = icon;
                 });
             }
             else
             {
-                IconSource = icon;
+                if (generation == Volatile.Read(ref _iconLoadGeneration)) IconSource = icon;
             }
         }
         catch (Exception ex)
@@ -194,6 +211,8 @@ public sealed class FileEntry : INotifyPropertyChanged
     public void Dispose()
     {
         _lifetime.Cancel();
+        Interlocked.Increment(ref _iconLoadGeneration);
+        IconSource = null;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>

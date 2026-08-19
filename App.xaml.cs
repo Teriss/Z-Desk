@@ -22,14 +22,39 @@ public partial class App : System.Windows.Application
     private readonly List<RegisteredWaitHandle> _createLayoutWaits = [];
     private readonly RecoveryService _recoveryService = new();
     private MainWindow? _mainWindow;
+    private string[] _startupArgs = [];
+    private bool _baseResourcesLoaded;
+    private bool _settingsResourcesLoaded;
+
+    internal void EnsureBaseResources()
+    {
+        if (_baseResourcesLoaded) return;
+        Resources.MergedDictionaries.Add(new ResourceDictionary
+        {
+            Source = new Uri("/ZDesk;component/Resources/AppTheme.xaml", UriKind.RelativeOrAbsolute)
+        });
+        _baseResourcesLoaded = true;
+    }
+
+    internal void EnsureSettingsResources()
+    {
+        EnsureBaseResources();
+        if (_settingsResourcesLoaded) return;
+        Resources.MergedDictionaries.Add(new ResourceDictionary
+        {
+            Source = new Uri("/ZDesk;component/Resources/SettingsTheme.xaml", UriKind.RelativeOrAbsolute)
+        });
+        _settingsResourcesLoaded = true;
+    }
+
+    public void RunWithArgs(string[] args)
+    {
+        _startupArgs = args;
+        Run();
+    }
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        if (DesktopIconVisibilityService.TryRunWatchdog(e.Args))
-        {
-            Environment.Exit(0);
-        }
-
         base.OnStartup(e);
 
         _instanceMutex = new Mutex(initiallyOwned: true, InstanceMutexName, out var createdNew);
@@ -57,7 +82,7 @@ public partial class App : System.Windows.Application
         MainWindow = _mainWindow;
         StartActivationListener();
         DesktopContextMenuRegistrationService.Register(Environment.ProcessPath);
-        var createKind = GetCreateLayoutKind(e.Args);
+        var createKind = GetCreateLayoutKind(_startupArgs);
         if (createKind is not null)
             _mainWindow.Loaded += (_, _) => _ = Dispatcher.BeginInvoke(() => _mainWindow.CreateLayoutFromDesktopMenu(createKind));
         _mainWindow.Show();

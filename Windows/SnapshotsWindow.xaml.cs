@@ -11,6 +11,7 @@ public partial class SnapshotsWindow : Window
     public LayoutSnapshot? SelectedSnapshot { get; private set; }
     public SnapshotsWindow(SnapshotService service, IReadOnlyList<GroupDefinition> current)
     {
+        (Application.Current as ZDesk.App)?.EnsureBaseResources();
         InitializeComponent(); _service = service; _current = current; Loaded += async (_, _) => await RefreshAsync();
     }
     private async void Create_Click(object sender, RoutedEventArgs e) { await _service.SaveAsync(NameBox.Text, _current); await RefreshAsync(); }

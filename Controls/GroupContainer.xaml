@@ -369,6 +369,7 @@
                          PreviewMouseLeftButtonUp="FileList_PreviewMouseLeftButtonUp"
                          PreviewMouseRightButtonDown="FileList_PreviewMouseRightButtonDown"
                          PreviewMouseMove="FileList_PreviewMouseMove"
+                         ScrollViewer.ScrollChanged="FileList_ScrollChanged"
                          PreviewKeyDown="FileList_PreviewKeyDown"
                          SelectionChanged="FileList_SelectionChanged"
                          PreviewMouseRightButtonUp="FileList_PreviewMouseRightButtonUp"
@@ -379,6 +380,7 @@
                     <ListBox.ItemContainerStyle>
                         <Style TargetType="ListBoxItem">
                             <EventSetter Event="Loaded" Handler="FileItem_Loaded" />
+                            <EventSetter Event="Unloaded" Handler="FileItem_Unloaded" />
                             <Setter Property="Padding" Value="0" />
                             <Setter Property="Margin" Value="2" />
                             <Setter Property="Background" Value="Transparent" />

@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace ZDesk.Controls;
 
@@ -28,6 +29,8 @@ public sealed class VirtualizingWrapPanel : VirtualizingPanel, IScrollInfo
     private int _realizedFirstIndex = -1;
     private int _realizedLastIndex = -1;
     private int _realizedColumns;
+    private bool _isMouseSelectionActive;
+    private int _mouseSelectionVersion;
 
     public double ItemWidth { get => (double)GetValue(ItemWidthProperty); set => SetValue(ItemWidthProperty, value); }
     public double ItemHeight { get => (double)GetValue(ItemHeightProperty); set => SetValue(ItemHeightProperty, value); }
@@ -140,6 +143,21 @@ public sealed class VirtualizingWrapPanel : VirtualizingPanel, IScrollInfo
     public double HorizontalOffset => 0;
     public double VerticalOffset => _verticalOffset;
 
+    internal void BeginMouseSelection()
+    {
+        _mouseSelectionVersion++;
+        _isMouseSelectionActive = true;
+    }
+
+    internal void EndMouseSelectionAfterInput()
+    {
+        var version = _mouseSelectionVersion;
+        _ = Dispatcher.BeginInvoke(() =>
+        {
+            if (version == _mouseSelectionVersion) _isMouseSelectionActive = false;
+        }, DispatcherPriority.ApplicationIdle);
+    }
+
     public void LineUp() => SetVerticalOffset(_verticalOffset - ItemHeight);
     public void LineDown() => SetVerticalOffset(_verticalOffset + ItemHeight);
     public void PageUp() => SetVerticalOffset(_verticalOffset - _viewport.Height);
@@ -166,6 +184,9 @@ public sealed class VirtualizingWrapPanel : VirtualizingPanel, IScrollInfo
 
     public Rect MakeVisible(Visual visual, Rect rectangle)
     {
+        // A clicked item is already visible. Suppress WPF's deferred
+        // BringIntoView request until the input/layout cycle has completed.
+        if (_isMouseSelectionActive) return rectangle;
         if (visual is not UIElement element) return rectangle;
         var index = IndexFromContainer(element);
         if (index < 0) return rectangle;
@@ -181,6 +202,7 @@ public sealed class VirtualizingWrapPanel : VirtualizingPanel, IScrollInfo
 
     protected override void BringIndexIntoView(int index)
     {
+        if (_isMouseSelectionActive) return;
         var itemCount = ItemsControl.GetItemsOwner(this)?.Items.Count ?? 0;
         if (index < 0 || index >= itemCount) return;
         var cellHeight = Math.Max(1, ItemHeight + VerticalSpacing);
@@ -191,9 +213,6 @@ public sealed class VirtualizingWrapPanel : VirtualizingPanel, IScrollInfo
 
     private int IndexFromContainer(UIElement element)
     {
-        var position = ItemContainerGenerator.IndexFromGeneratorPosition(ItemContainerGenerator.GeneratorPositionFromIndex(0));
-        for (var index = 0; index < InternalChildren.Count; index++)
-            if (ReferenceEquals(InternalChildren[index], element)) return position + index;
-        return -1;
+        return ItemsControl.GetItemsOwner(this)?.ItemContainerGenerator.IndexFromContainer(element) ?? -1;
     }
 }

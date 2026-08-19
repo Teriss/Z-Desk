@@ -36,7 +36,7 @@ AppState
 
 ### 桌面图标
 
-`DesktopIconVisibilityService` 控制 Explorer `SysListView32` 的可见性。启动时隐藏，正常退出恢复；watchdog 等待主进程退出后恢复异常状态。
+`DesktopIconVisibilityService` 控制 Explorer `SysListView32` 的可见性。启动时隐藏，正常退出恢复；watchdog 由自定义 STA 入口在创建 WPF `App` 前直接运行，只等待主进程退出后恢复异常状态，不加载 WPF 资源。
 
 ### 双击隐藏
 
@@ -79,6 +79,8 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 - 二维码取景框边界属于用户设置，保存为 `AppSettings.QrRecognitionFrameBounds`；屏幕图像和二维码正文不是持久化数据，只在一次识别会话内驻留内存。
 - `AppDataPathService`：路径配置、目录迁移和运行时服务切换。
 
+启动完成、延迟启动和二维码识别结束时，`MemoryDiagnosticsService` 将工作集、私有内存、托管堆、GC 已提交内存、WPF 渲染模式/等级、布局窗口与文件项数量，以及 Shell 图像缓存项数/估算字节数写入现有日志。图像缓存最多保留 256 项且估算像素内存不超过 16 MB。
+
 路径指针保存在 `HKCU\Software\ZDesk`。迁移先复制，成功后切换路径，旧目录保留为备份。
 
 ## 6. 首次启动与规则
@@ -102,3 +104,48 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 
 设置中心采用左侧单列导航和右侧卡片内容区。通用颜色与控件样式由 `Resources/SettingsTheme.xaml` 及设置窗口资源提供；深色界面不得使用 WPF 默认白底控件或系统图标字体。新增界面必须遵守 [UI 设计规范](UI_STYLE.md) 并完成多 DPI、交互状态和 Win10/Win11 验收。
 二维码识别使用 `QrRecognitionFrameController` 管理可复用取景框。进入模式不捕获桌面；识别时 `ScreenCaptureService.CaptureRegion` 只复制物理选区与显示器交集，空隙填白，随后在后台调用 ZXingCpp。
+## 10. Memory baseline and watchdog
+
+- The normal entrypoint initializes WPF only for the main application. The Explorer icon watchdog is a small native payload embedded in `ZDesk.exe`; it is extracted to a per-user temporary directory and waits for the parent process without loading CLR/WPF.
+- `MemoryDiagnosticsService` logs total working set, private working set, private commit, managed heap, GC committed bytes, WPF render mode/tier, layout/file counts, and Shell icon cache diagnostics.
+- Shell context-menu warm-up is demand-driven on first use. Hardware rendering remains the default; `--software-rendering` is a diagnostic-only comparison switch.
+- Search, rule-refresh and edge-hide DispatcherTimers are created only when the
+  corresponding workflow is first used; QuickLook provider discovery is also
+  deferred until preview is requested.
+- Startup also schedules one cancellation-based 60-second idle snapshot and
+  working-set trim, so deferred Shell and watcher work does not permanently
+  raise the steady-state resident set.
+- The shared WPF application theme is loaded only when a WPF desktop fallback
+  or dialog is created; native desktop startup does not parse its button
+  templates or brushes.
+- Desktop layout windows use ordinary WPF top-level windows with a Win32 rounded region rather than WPF layered transparency. This reduces private commit pressure while retaining the current WorkerW and content behavior.
+- The hidden controller window is also non-layered; it remains off-screen and has no visible content, while avoiding an otherwise unnecessary transparent compositor surface.
+- The native desktop presentation is retained as internal experimental code.
+  `NativeDesktopWindow`
+  now owns an independent top-level `WS_POPUP` HWND with WorkerW placement,
+  rounded region, paint/scroll/hit testing, and presentation-independent
+  selection updates. It must continue to own the top-level Win32 layout window
+  because the existing transparent WPF windows cannot host child HWND content.
+  Its DPI change path applies Windows' suggested `WM_DPICHANGED` bounds before
+  persisting the layout position and size.
+  The native surface also exposes OLE item-drag initiation and edge hide/reveal
+  state; the controller continues to own Shell data objects and persistence.
+  `NativeDesktopWindowController` owns this native HWND lifecycle and binds the
+  existing `GroupContainer` model snapshot. Layout chrome, Shell menus,
+  OLE drag/drop, keyboard navigation, resize, edge hiding and DPI are routed
+  through this surface; Explorer recovery still requires Windows manual
+  validation.
+  WPF is the sole supported production presentation path. The native HWND
+  path has no public command-line switch and is not part of the functional
+  acceptance baseline. In production the WPF bridge binds the visible WPF
+  visual tree, `FileList`, details header, item templates, and tab buttons.
+  The native-only selection snapshot and detached-host optimizations apply
+  only to isolated internal tests.
+  Shell file-operation services are also lazy per layout and are instantiated
+  only when a copy, move, rename or recycle operation is requested.
+  The QR recognition frame controller is created only on the first QR command;
+  display-change handling leaves it absent until then.
+  Native Shell icon handles are bounded to 256 per HWND and released when the
+  item leaves the snapshot or the HWND closes.
+  Edge-hide hot-zone polling and topmost transitions operate on the WPF
+  desktop windows in production.

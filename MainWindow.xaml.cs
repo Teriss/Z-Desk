@@ -18,7 +18,7 @@ public partial class MainWindow : Window
     private readonly RecoveryService _recoveryService;
     private readonly LayoutStore _layoutStore = new();
     private readonly GlobalHotKeyService _hotKeyService = new();
-    private readonly QrRecognitionFrameController _qrFrameController;
+    private QrRecognitionFrameController? _qrFrameController;
     private readonly DispatcherTimer _saveTimer;
     private readonly DesktopDoubleClickService _desktopDoubleClickService;
     private readonly TrayIconService _trayIconService;
@@ -31,6 +31,7 @@ public partial class MainWindow : Window
     private readonly ShellChangeNotificationService _shellChangeNotifications = new();
     private DesktopSurfaceWindow? _desktopSurface;
     private readonly List<DesktopGroupWindow> _desktopWindows = [];
+    private readonly Dictionary<Guid, NativeDesktopWindowController> _nativeDesktopControllers = [];
     private AppState _state = new();
     private bool _groupsHidden;
     private bool _isLoaded;
@@ -39,15 +40,19 @@ public partial class MainWindow : Window
     private readonly HashSet<Guid> _activeHotKeyBindings = [];
     private readonly Dictionary<int, Guid> _hotKeyBindingKeys = [];
     private QrRecognitionResultsWindow? _qrResultsWindow;
+    private CancellationTokenSource? _qrRecognitionCancellation;
     private bool _qrRecognitionRunning;
     private bool _temporarilyRevealed;
     private bool _topmostFromHotKey;
     private bool _shutdownInProgress;
     private bool _shutdownReady;
     private bool _applicationExitRequested;
-    private readonly DispatcherTimer _searchTimer;
-    private readonly DispatcherTimer _ruleTimer;
-    private readonly DispatcherTimer _edgeTimer;
+    private CancellationTokenSource? _idleMemorySnapshotCancellation;
+    private DispatcherTimer? _searchTimer;
+    private DispatcherTimer? _ruleTimer;
+    private DispatcherTimer? _edgeTimer;
+    private CancellationTokenSource? _searchCancellation;
+    private FileEntry[] _searchResultEntries = [];
     private bool _rulesRunning;
     private bool _saveRunning;
     private bool _savePending;
@@ -59,15 +64,6 @@ public partial class MainWindow : Window
     public MainWindow(RecoveryService recoveryService)
     {
         InitializeComponent();
-        _qrFrameController = new QrRecognitionFrameController(
-            this,
-            () => _state.Settings.QrRecognitionFrameBounds,
-            bounds =>
-            {
-                _state.Settings.QrRecognitionFrameBounds = bounds;
-                if (_isLoaded) ScheduleSave();
-            });
-        _qrFrameController.RecognitionRequested += QrFrame_RecognitionRequested;
         _recoveryService = recoveryService;
         _diagnosticService = new DiagnosticService(_layoutStore);
         _desktopFiles = new DesktopFileService(Dispatcher);
@@ -77,12 +73,6 @@ public partial class MainWindow : Window
 
         _saveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
         _saveTimer.Tick += SaveTimer_Tick;
-        _searchTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(220) };
-        _searchTimer.Tick += SearchTimer_Tick;
-        _ruleTimer = new DispatcherTimer();
-        _ruleTimer.Tick += LayoutRuleTimer_Tick;
-        _edgeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
-        _edgeTimer.Tick += (_, _) => UpdateEdgeVisibility();
         _desktopDoubleClickService = new DesktopDoubleClickService(Dispatcher);
         _desktopDoubleClickService.DesktopBlankDoubleClicked += (_, _) =>
         {
@@ -109,6 +99,25 @@ public partial class MainWindow : Window
         Closing += MainWindow_Closing;
         SystemEvents.DisplaySettingsChanged += SystemEvents_DisplaySettingsChanged;
         _hotKeyService.BindingPressed += HotKeyBindingPressed;
+    }
+
+    private QrRecognitionFrameController EnsureQrFrameController()
+    {
+        return _qrFrameController ??= CreateQrFrameController();
+    }
+
+    private QrRecognitionFrameController CreateQrFrameController()
+    {
+        var controller = new QrRecognitionFrameController(
+            this,
+            () => _state.Settings.QrRecognitionFrameBounds,
+            bounds =>
+            {
+                _state.Settings.QrRecognitionFrameBounds = bounds;
+                if (_isLoaded) ScheduleSave();
+            });
+        controller.RecognitionRequested += QrFrame_RecognitionRequested;
+        return controller;
     }
 
     private void DesktopFiles_Changed(object? sender, DesktopFilesChangedEventArgs e)
@@ -256,14 +265,46 @@ public partial class MainWindow : Window
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        _searchTimer.Stop();
-        if (SearchBox.Text.Trim().Length < 2) { SearchPopup.IsOpen = false; return; }
-        _searchTimer.Start();
+        EnsureSearchTimer().Stop();
+        _searchCancellation?.Cancel();
+        if (SearchBox.Text.Trim().Length < 2)
+        {
+            SearchPopup.IsOpen = false;
+            ClearSearchResults();
+            return;
+        }
+            EnsureSearchTimer().Start();
+    }
+
+    private DispatcherTimer EnsureSearchTimer()
+    {
+        return _searchTimer ??= CreateTimer(TimeSpan.FromMilliseconds(220), SearchTimer_Tick);
+    }
+
+    private DispatcherTimer EnsureRuleTimer()
+    {
+        return _ruleTimer ??= CreateTimer(Timeout.InfiniteTimeSpan, LayoutRuleTimer_Tick);
+    }
+
+    private DispatcherTimer EnsureEdgeTimer()
+    {
+        return _edgeTimer ??= CreateTimer(TimeSpan.FromMilliseconds(60), (_, _) => UpdateEdgeVisibility());
+    }
+
+    private static DispatcherTimer CreateTimer(TimeSpan interval, EventHandler handler)
+    {
+        var timer = new DispatcherTimer { Interval = interval };
+        timer.Tick += handler;
+        return timer;
     }
 
     private async void SearchTimer_Tick(object? sender, EventArgs e)
     {
-        _searchTimer.Stop();
+        _searchTimer?.Stop();
+        _searchCancellation?.Cancel();
+        _searchCancellation?.Dispose();
+        var cancellation = new CancellationTokenSource();
+        _searchCancellation = cancellation;
         try
         {
         var query = SearchBox.Text.Trim();
@@ -271,15 +312,38 @@ public partial class MainWindow : Window
             .Select(group => group.FolderPath!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var results = await Task.Run(() => folders.SelectMany(folder =>
         {
+            cancellation.Token.ThrowIfCancellationRequested();
             try { return Directory.EnumerateFileSystemEntries(folder, "*", SearchOption.TopDirectoryOnly); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return []; }
         }).Where(path => Path.GetFileName(path).Contains(query, StringComparison.CurrentCultureIgnoreCase))
-          .Take(100).Select(path => new FileEntry(Path.GetFileName(path), path, Directory.Exists(path))).ToArray());
-        if (query != SearchBox.Text.Trim()) return;
+          .Take(100).Select(path => new FileEntry(Path.GetFileName(path), path, Directory.Exists(path))).ToArray(), cancellation.Token);
+        if (cancellation.IsCancellationRequested || query != SearchBox.Text.Trim())
+        {
+            foreach (var entry in results) entry.Dispose();
+            return;
+        }
+        ClearSearchResults();
+        _searchResultEntries = results;
         SearchResults.ItemsSource = results;
         SearchPopup.IsOpen = results.Length > 0;
         }
+        catch (OperationCanceledException) { }
         catch (Exception ex) { LogService.Warning("Search failed", ex); }
+        finally
+        {
+            if (ReferenceEquals(_searchCancellation, cancellation))
+            {
+                _searchCancellation.Dispose();
+                _searchCancellation = null;
+            }
+        }
+    }
+
+    private void ClearSearchResults()
+    {
+        SearchResults.ItemsSource = null;
+        foreach (var entry in _searchResultEntries) entry.Dispose();
+        _searchResultEntries = [];
     }
 
     private void SearchResults_MouseDoubleClick(object sender, MouseButtonEventArgs e)
@@ -288,6 +352,7 @@ public partial class MainWindow : Window
         {
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(entry.FullPath) { UseShellExecute = true });
             SearchPopup.IsOpen = false;
+            ClearSearchResults();
         }
     }
 
@@ -295,6 +360,7 @@ public partial class MainWindow : Window
     {
         _ = Dispatcher.BeginInvoke(async () =>
         {
+            if (_shutdownInProgress || !_isLoaded) return;
             CaptureCurrentLayout();
             if (_state.Settings.AutoSwitchDisplayLayouts)
             {
@@ -310,9 +376,10 @@ public partial class MainWindow : Window
             }
             foreach (var window in _desktopWindows)
             {
+                if (_shutdownInProgress) return;
                 window.EnsureVisibleOnCurrentDisplays();
             }
-            _qrFrameController.RefreshDisplayLayout();
+            _qrFrameController?.RefreshDisplayLayout();
             _desktopSurface?.EnsureVisibleBounds();
 
             StatusText.Text = "显示器配置已变化，桌面分组位置已重新校验";
@@ -343,6 +410,12 @@ public partial class MainWindow : Window
         var desktopDoubleClickReady = _desktopDoubleClickService.Start();
         StatusText.Text = GetStartupStatus(hotKeyRegistered, desktopDoubleClickReady, hotKeyError);
         _isLoaded = true;
+        MemoryDiagnosticsService.Log("startup", _desktopWindows.Count, CountFileEntries());
+        _ = LogDelayedStartupMemoryAsync();
+        // Deferred Shell and watcher work can fault pages back in after the
+        // early startup trim. Schedule the existing one-shot idle reclaim so
+        // the steady-state working set is measured and returned consistently.
+        ScheduleIdleMemorySnapshot("startup-idle");
         if (firstRun)
         {
             await ReapplyLayoutRulesAsync();
@@ -356,7 +429,6 @@ public partial class MainWindow : Window
             CreateLayoutFromDesktopMenu(pendingCreateKind, screenPoint: pendingPoint);
         }
         _shellChangeNotifications.Start(this, [_desktopFiles.UserDesktop, _desktopFiles.CommonDesktop]);
-        _ = ShellContextMenuService.WarmUpAsync(_desktopFiles.EnumerateItems());
         ConfigureRuleTimer();
         ConfigureEdgeMode();
         Opacity = 1;
@@ -423,6 +495,8 @@ public partial class MainWindow : Window
     private void RecreateDesktopGroups()
     {
         foreach (var existing in _desktopWindows.ToArray()) existing.Close();
+        foreach (var native in _nativeDesktopControllers.Values) native.Dispose();
+        _nativeDesktopControllers.Clear();
         _desktopWindows.Clear();
         foreach (var definition in _state.Groups) AddDesktopGroupWindow(definition);
         _desktopSurface?.RefreshItems();
@@ -441,6 +515,7 @@ public partial class MainWindow : Window
         foreach (var window in _desktopWindows.Where(window => !requestedIds.Contains(window.Group.Definition.Id)).ToArray())
         {
             _desktopWindows.Remove(window);
+            if (_nativeDesktopControllers.Remove(window.Group.Definition.Id, out var native)) native.Dispose();
             window.Close();
         }
 
@@ -581,19 +656,83 @@ public partial class MainWindow : Window
         window.Group.CreateLayoutRequested += kind => CreateLayoutFromDesktopMenu(
             kind == GroupKind.Folder ? "folder" : "empty", window);
         window.InteractionRequested += (_, _) => BringLayoutToFront(window);
+        window.UserInteraction += (_, _) => ScheduleIdleMemorySnapshot("user-idle");
         window.Group.StatusChanged += (_, message) => StatusText.Text = message;
         window.Group.HeaderDragCompleted += screenPoint => HandleHeaderDragCompleted(window, screenPoint);
         window.Group.TabDragStarted += (payload, screenPoint) => BeginDetachedTabDrag(window, payload, screenPoint);
         _desktopWindows.Add(window);
-        if (!_groupsHidden || _isTopmost)
+        NativeDesktopWindowController? controller = null;
+        if (DesktopRenderingOptions.UseNativeTopLevel)
+        {
+            controller = new NativeDesktopWindowController(window.Group, new NativeDesktopBounds(
+                (int)Math.Round(window.Left),
+                (int)Math.Round(window.Top),
+                Math.Max(220, (int)Math.Round(definition.Width)),
+                Math.Max(36, (int)Math.Round(definition.IsCollapsed ? window.Group.CurrentHeaderHeight : definition.Height))),
+                (int)Math.Round(_state.Settings.ContainerCornerRadius));
+            controller.LayoutChanged += (_, _) => ScheduleSave();
+            _nativeDesktopControllers[definition.Id] = controller;
+            controller.Show();
+            // The native controller owns presentation now. Detach the WPF
+            // visual tree so its templates, item containers, and compositor
+            // resources are eligible for collection while the model remains
+            // alive for Shell/watchers and native snapshot updates.
+            window.DetachVisualTreeForNativePresentation();
+        }
+        else if (!_groupsHidden || _isTopmost)
         {
             if (animate) window.ShowAnimated();
             else window.Show();
         }
-        window.SetInteractionMode(_state.Settings.InteractionMode);
-        if (IsTopmostRequested(window)) window.SetTemporaryTopmost(true);
-        else window.RestoreDesktopLayer();
+        if (DesktopRenderingOptions.UseNativeTopLevel)
+        {
+            controller!.Window.DockEdge = definition.DockEdge;
+            if (IsTopmostRequested(window)) controller.Window.SetTemporaryTopmost(true);
+            else controller.Window.RestoreDesktopLayer();
+        }
+        else
+        {
+            window.SetInteractionMode(_state.Settings.InteractionMode);
+            if (IsTopmostRequested(window)) window.SetTemporaryTopmost(true);
+            else window.RestoreDesktopLayer();
+        }
         return window;
+    }
+
+    private void ScheduleIdleMemorySnapshot(string phase)
+    {
+        if (!_isLoaded) return;
+        _idleMemorySnapshotCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        _idleMemorySnapshotCancellation = cancellation;
+        _ = LogIdleMemorySnapshotAsync(phase, cancellation);
+    }
+
+    private async Task LogIdleMemorySnapshotAsync(string phase, CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(60), cancellation.Token);
+            if (cancellation.IsCancellationRequested || !_isLoaded) return;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                MemoryDiagnosticsService.Log(
+                    $"{phase}-60s",
+                    _desktopWindows.Count,
+                    CountFileEntries());
+            });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            if (ReferenceEquals(_idleMemorySnapshotCancellation, cancellation))
+            {
+                _idleMemorySnapshotCancellation.Dispose();
+                _idleMemorySnapshotCancellation = null;
+            }
+        }
     }
 
     private void BringLayoutToFront(DesktopGroupWindow window)
@@ -791,18 +930,17 @@ public partial class MainWindow : Window
         _groupsHidden = !_groupsHidden;
         foreach (var window in _desktopWindows)
         {
-            if (_groupsHidden)
+            if (_nativeDesktopControllers.TryGetValue(window.Group.Definition.Id, out var native))
             {
-                window.HideAnimated();
+                if (_groupsHidden) native.Hide(); else native.Show();
             }
-            else
-            {
-                window.ShowAnimated();
-            }
+            else if (_groupsHidden) window.HideAnimated();
+            else window.ShowAnimated();
         }
 
         HideButton.Content = _groupsHidden ? "显示分组" : "隐藏分组";
         StatusText.Text = _groupsHidden ? "分组已隐藏" : "分组已显示";
+        ScheduleIdleMemorySnapshot(_groupsHidden ? "groups-hidden" : "groups-shown");
         if (_state.Settings.RememberGroupsHidden)
         {
             _state.Settings.GroupsHidden = _groupsHidden;
@@ -859,7 +997,7 @@ public partial class MainWindow : Window
     private void StartQrRecognition()
     {
         if (!_isLoaded || _qrRecognitionRunning) return;
-        _qrFrameController.Show();
+        EnsureQrFrameController().Show();
         StatusText.Text = "二维码取景框已打开，可移动或缩放后点击识别";
     }
 
@@ -867,6 +1005,10 @@ public partial class MainWindow : Window
     {
         if (!_isLoaded || _qrRecognitionRunning) return;
         _qrRecognitionRunning = true;
+        _qrRecognitionCancellation?.Cancel();
+        _qrRecognitionCancellation?.Dispose();
+        var cancellation = new CancellationTokenSource();
+        _qrRecognitionCancellation = cancellation;
         try
         {
             if (_qrResultsWindow is not null)
@@ -876,33 +1018,56 @@ public partial class MainWindow : Window
                 _qrResultsWindow = null;
             }
 
-            var capture = await Task.Run(() => ScreenCaptureService.CaptureRegion(bounds));
+            var capture = await Task.Run(() => ScreenCaptureService.CaptureRegion(bounds), cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
             if (capture is null)
             {
-                _qrFrameController.RestoreAfterFailure();
+                EnsureQrFrameController().RestoreAfterFailure();
                 StatusText.Text = "未检测到可用显示器";
                 return;
             }
 
             var captured = capture!;
-            var results = await Task.Run(() => QrCodeRecognitionService.Decode(captured));
+            var results = await Task.Run(() => QrCodeRecognitionService.Decode(captured), cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            MemoryDiagnosticsService.Log("qr-recognition", _desktopWindows.Count, CountFileEntries());
             _qrResultsWindow = new QrRecognitionResultsWindow(results);
             _qrResultsWindow.Closed += (_, _) => _qrResultsWindow = null;
             _qrResultsWindow.Show();
             _qrResultsWindow.Activate();
             StatusText.Text = results.Count == 0 ? "选区内未识别到二维码" : $"已识别 {results.Count} 个二维码";
         }
+        catch (OperationCanceledException)
+        {
+            if (_isLoaded) _qrFrameController?.RestoreAfterFailure();
+        }
         catch (Exception ex)
         {
             LogService.Warning("QR code recognition failed", ex);
-            _qrFrameController.RestoreAfterFailure();
+            _qrFrameController?.RestoreAfterFailure();
             StatusText.Text = "二维码识别失败，请重试";
         }
         finally
         {
             _qrRecognitionRunning = false;
+            if (ReferenceEquals(_qrRecognitionCancellation, cancellation))
+            {
+                _qrRecognitionCancellation.Dispose();
+                _qrRecognitionCancellation = null;
+            }
         }
     }
+
+    private async Task LogDelayedStartupMemoryAsync()
+    {
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        if (!_isLoaded) return;
+        MemoryDiagnosticsService.Log("startup-delayed", _desktopWindows.Count, CountFileEntries());
+        if (MemoryDiagnosticsService.TrimNativeDesktopWorkingSet())
+            MemoryDiagnosticsService.Log("native-idle-trim", _desktopWindows.Count, CountFileEntries());
+    }
+
+    private int CountFileEntries() => _desktopWindows.Sum(window => window.Group.FileEntryCount);
 
     private void ApplyActiveTopmostState()
     {
@@ -912,8 +1077,16 @@ public partial class MainWindow : Window
             _isTopmost = true;
             foreach (var window in _desktopWindows.ToArray())
             {
-                if (!window.IsVisible && !_groupsHidden) window.ShowAnimated();
-                window.SetTemporaryTopmost(true);
+                if (_nativeDesktopControllers.TryGetValue(window.Group.Definition.Id, out var native))
+                {
+                    if (!_groupsHidden) native.Show();
+                    native.Window.SetTemporaryTopmost(true);
+                }
+                else
+                {
+                    if (!window.IsVisible && !_groupsHidden) window.ShowAnimated();
+                    window.SetTemporaryTopmost(true);
+                }
             }
             UpdateToolbarState();
             ScheduleSave();
@@ -938,6 +1111,27 @@ public partial class MainWindow : Window
         _isTopmost = targets.Count > 0;
         foreach (var window in _desktopWindows.ToArray())
         {
+            if (_nativeDesktopControllers.TryGetValue(window.Group.Definition.Id, out var nativeController))
+            {
+                var isNativeTargeted = hasAllLayoutsBinding
+                    ? targets.Count > 0
+                    : (window.Group.Definition.Tabs.Count == 0
+                        ? targets.Contains(window.Group.Definition.Id)
+                        : window.Group.Definition.Tabs.Any(tab => targets.Contains(tab.Id)));
+                if (isNativeTargeted)
+                {
+                    if (!_groupsHidden) nativeController.Show();
+                    nativeController.Window.RevealFromEdge();
+                    nativeController.Window.SetTemporaryTopmost(true);
+                }
+                else
+                {
+                    nativeController.Window.SetTemporaryTopmost(false);
+                    if (_groupsHidden) nativeController.Hide();
+                    else nativeController.Window.RestoreDesktopLayer();
+                }
+                continue;
+            }
             var matchingTabs = window.Group.Definition.Tabs
                 .Select((tab, index) => (tab, index))
                 .Where(item => targets.Contains(item.tab.Id))
@@ -996,7 +1190,7 @@ public partial class MainWindow : Window
             if (!_isTopmost) return;
             foreach (var window in _desktopWindows.ToArray())
             {
-                if (!window.IsVisible) window.Show();
+                if (!window.IsVisible) window.ShowAnimated();
                 window.SetTemporaryTopmost(true);
             }
         }, DispatcherPriority.ContextIdle);
@@ -1222,11 +1416,12 @@ public partial class MainWindow : Window
 
     private void ConfigureRuleTimer()
     {
-        _ruleTimer.Stop();
+        _ruleTimer?.Stop();
         if (_state.Settings.AutoRunRules && _state.LayoutMatchRules.Count > 0)
         {
-            _ruleTimer.Interval = TimeSpan.FromMinutes(_state.Settings.RuleIntervalMinutes);
-            _ruleTimer.Start();
+            var ruleTimer = EnsureRuleTimer();
+            ruleTimer.Interval = TimeSpan.FromMinutes(_state.Settings.RuleIntervalMinutes);
+            ruleTimer.Start();
         }
     }
 
@@ -1317,17 +1512,25 @@ public partial class MainWindow : Window
         {
             window.Group.ApplyAppearance(_state.Settings.EnableAnimations, _state.Settings.ContainerOpacity,
                 _state.Settings.ContainerCornerRadius, _state.Settings.IconSize, _state.Settings.AnimationSpeed);
-            window.SetInteractionMode(_state.Settings.InteractionMode);
-            if (_state.Settings.InteractionMode == LayoutInteractionMode.EdgeHide)
-                window.UpdateDockFromCurrentPosition(_state.Settings.InteractionMode);
+            if (_nativeDesktopControllers.TryGetValue(window.Group.Definition.Id, out var native))
+            {
+                native.Window.DockEdge = window.Group.Definition.DockEdge;
+                native.ApplyDefinition();
+            }
+            else
+            {
+                window.SetInteractionMode(_state.Settings.InteractionMode);
+                if (_state.Settings.InteractionMode == LayoutInteractionMode.EdgeHide)
+                    window.UpdateDockFromCurrentPosition(_state.Settings.InteractionMode);
+            }
         }
         ConfigureEdgeMode();
     }
 
     private void ConfigureEdgeMode()
     {
-        if (_state.Settings.InteractionMode == LayoutInteractionMode.EdgeHide) _edgeTimer.Start();
-        else _edgeTimer.Stop();
+        if (_state.Settings.InteractionMode == LayoutInteractionMode.EdgeHide) EnsureEdgeTimer().Start();
+        else _edgeTimer?.Stop();
     }
 
     private void UpdateEdgeVisibility()
@@ -1335,31 +1538,45 @@ public partial class MainWindow : Window
         if (_state.Settings.InteractionMode != LayoutInteractionMode.EdgeHide || _groupsHidden) return;
         foreach (var window in _desktopWindows.ToArray())
         {
-            if (window.DockEdge == DockEdge.None) continue;
+            var native = _nativeDesktopControllers.TryGetValue(window.Group.Definition.Id, out var nativeController)
+                ? nativeController.Window
+                : null;
+            var dockEdge = native?.DockEdge ?? window.DockEdge;
+            if (dockEdge == DockEdge.None) continue;
             var cursor = System.Windows.Forms.Cursor.Position;
-            var inRevealZone = window.IsCursorInRevealZone(cursor);
-            if (window.IsEdgeHidden)
+            var inRevealZone = native?.IsCursorInRevealZone(cursor) ?? window.IsCursorInRevealZone(cursor);
+            var isEdgeHidden = native?.IsEdgeHidden ?? window.IsEdgeHidden;
+            if (isEdgeHidden)
             {
                 if (inRevealZone)
                 {
-                    window.RevealFromEdge(animate: true);
-                    window.SetTemporaryTopmost(true);
+                    if (native is not null) native.RevealFromEdge();
+                    else window.RevealFromEdge(animate: true);
+                    if (native is not null) native.SetTemporaryTopmost(true);
+                    else window.SetTemporaryTopmost(true);
                 }
                 continue;
             }
 
-            var inExpandedBounds = window.IsCursorInExpandedBounds(cursor);
+            var inExpandedBounds = native?.IsCursorInExpandedBounds(cursor) ?? window.IsCursorInExpandedBounds(cursor);
             if (inRevealZone || inExpandedBounds)
             {
                 // A layout can receive a normal Z-order request while the
                 // pointer is entering it. Keep the edge-revealed state truly
                 // topmost until the pointer leaves the activation/contents area.
-                if (!window.IsTemporaryTopmost)
-                    window.SetTemporaryTopmost(true);
+                if (native is not null)
+                {
+                    if (!native.IsTemporaryTopmost) native.SetTemporaryTopmost(true);
+                }
+                else if (!window.IsTemporaryTopmost) window.SetTemporaryTopmost(true);
                 continue;
             }
 
-            if (!window.IsInteractionBusy)
+            if (native is not null)
+            {
+                native.HideToEdge();
+            }
+            else if (!window.IsInteractionBusy)
             {
                 window.HideToEdge(animate: true);
             }
@@ -1530,6 +1747,13 @@ public partial class MainWindow : Window
         {
             var definition = window.Group.Definition;
             definition.StoreActiveTab();
+            if (_nativeDesktopControllers.ContainsKey(definition.Id))
+            {
+                // NativeDesktopWindowController persists physical bounds from
+                // the real HWND. The detached WPF host has stale dimensions
+                // and must never overwrite them during a save.
+                continue;
+            }
             // Hidden edge-dock windows intentionally sit outside the visible
             // desktop. Their persisted desktop position must remain the last
             // expanded position, otherwise an unrelated layout move makes them
@@ -1577,6 +1801,7 @@ public partial class MainWindow : Window
 
         _shutdownInProgress = true;
         _isLoaded = false;
+        _idleMemorySnapshotCancellation?.Cancel();
         _saveTimer.Stop();
         try
         {
@@ -1592,11 +1817,17 @@ public partial class MainWindow : Window
             window.Close();
         }
 
+        foreach (var native in _nativeDesktopControllers.Values) native.Dispose();
+        _nativeDesktopControllers.Clear();
+
         _desktopWindows.Clear();
         _explorerIconVisibility.Restore();
         _desktopSurface?.Close();
         _desktopSurface = null;
-        _qrFrameController.Dispose();
+        _qrFrameController?.Dispose();
+        _qrRecognitionCancellation?.Cancel();
+        _qrRecognitionCancellation?.Dispose();
+        _qrRecognitionCancellation = null;
         _qrResultsWindow?.Close();
         _qrResultsWindow = null;
         _desktopFiles.Dispose();
@@ -1607,9 +1838,13 @@ public partial class MainWindow : Window
         _hotKeyService.Dispose();
         _desktopDoubleClickService.Dispose();
         _trayIconService.Dispose();
-        _searchTimer.Stop();
-        _ruleTimer.Stop();
-        _edgeTimer.Stop();
+        _searchTimer?.Stop();
+        _searchCancellation?.Cancel();
+        _searchCancellation?.Dispose();
+        _searchCancellation = null;
+        ClearSearchResults();
+        _ruleTimer?.Stop();
+        _edgeTimer?.Stop();
         SystemEvents.DisplaySettingsChanged -= SystemEvents_DisplaySettingsChanged;
         _recoveryService.MarkSessionCompleted();
 

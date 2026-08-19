@@ -15,6 +15,10 @@ if (!normalizedTestRoot.StartsWith(normalizedTemp + Path.DirectorySeparatorChar,
 
 try
 {
+    Assert(!DesktopRenderingOptions.UseNativeTopLevel,
+        "production desktop rendering defaults to WPF");
+    Assert(!DesktopRenderingOptions.UseNativeDesktop,
+        "native desktop child renderer is disabled by default");
     await TestFileTransfersAsync(normalizedTestRoot);
     await TestShellFileOperationsAsync(normalizedTestRoot);
     await TestPreviewProvidersAsync(normalizedTestRoot);
@@ -43,6 +47,9 @@ try
     TestUpdateManifestComparison();
     TestUpdateRollbackPreparation(normalizedTestRoot);
     TestShellIcons(normalizedTestRoot);
+    TestMemoryDiagnostics(normalizedTestRoot);
+    TestNativeDesktopLayout();
+    TestDesktopSelectionState();
     TestDesktopWindowStyle(normalizedTestRoot);
     TestIncrementalLayoutItemSync(normalizedTestRoot);
     TestVirtualizingWrapPanel();
@@ -148,6 +155,14 @@ static async Task TestPreviewProvidersAsync(string root)
         (_, _) => throw new System.ComponentModel.Win32Exception(2));
     Assert(!await new FilePreviewService([failing]).TryPreviewAsync(previewFile),
         "QuickLook launch failure returns silently");
+
+    var unexpectedFailure = new QuickLookPreviewProvider(
+        () => executableTarget,
+        (_, _) => throw new MissingMemberException("preview test failure"));
+    Assert(!await new FilePreviewService([unexpectedFailure]).TryPreviewAsync(previewFile),
+        "unexpected QuickLook failure is contained");
+    Assert(new Lazy<FilePreviewService>(() => new FilePreviewService()).Value is not null,
+        "lazy preview service uses an explicit factory");
 
     var first = new FileEntry("first.txt", previewFile, false);
     var secondPath = Path.Combine(root, "preview-second.txt");
@@ -278,8 +293,31 @@ static void TestVirtualizingWrapPanelCore()
     Assert(realized < 500 && realized > 0, "virtualizing wrap panel limits realized containers");
     panel!.SetVerticalOffset(10_000);
     PumpDispatcher(TimeSpan.FromMilliseconds(80));
-    Assert(list.ItemContainerGenerator.ContainerFromIndex(499) is not null,
+    var lastContainer = list.ItemContainerGenerator.ContainerFromIndex(499) as System.Windows.UIElement;
+    Assert(lastContainer is not null,
         "virtualizing wrap panel realizes the last item after scrolling");
+    var indexFromContainer = typeof(VirtualizingWrapPanel).GetMethod("IndexFromContainer",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+    Assert((int?)indexFromContainer?.Invoke(panel, [lastContainer]) == 499,
+        "virtualizing wrap panel uses the real item index");
+
+    var bottomOffset = panel.VerticalOffset;
+    var beginMouseSelection = typeof(VirtualizingWrapPanel).GetMethod("BeginMouseSelection",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+    var endMouseSelection = typeof(VirtualizingWrapPanel).GetMethod("EndMouseSelectionAfterInput",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+    var bringIndexIntoView = typeof(VirtualizingWrapPanel).GetMethod("BringIndexIntoView",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+    beginMouseSelection?.Invoke(panel, null);
+    bringIndexIntoView?.Invoke(panel, [0]);
+    panel.MakeVisible(lastContainer!, System.Windows.Rect.Empty);
+    Assert(Math.Abs(panel.VerticalOffset - bottomOffset) < 0.1,
+        "mouse selection keeps the current scroll offset");
+    endMouseSelection?.Invoke(panel, null);
+    PumpDispatcher(TimeSpan.FromMilliseconds(80));
+    bringIndexIntoView?.Invoke(panel, [0]);
+    Assert(panel.VerticalOffset < bottomOffset,
+        "keyboard or programmatic selection can still scroll");
     window.Close();
 
     var collection = new ResettableObservableCollection<int> { 1, 2, 3 };
@@ -1065,6 +1103,91 @@ static void TestShellIcons(string root)
     var thumbnail = ShellIconService.GetDisplayImage(bitmapFile, isDirectory: false);
     Assert(thumbnail is System.Windows.Media.Imaging.BitmapSource { PixelWidth: >= 64 },
         "native shell thumbnail resolution");
+    var cache = ShellIconService.GetCacheDiagnostics();
+    Assert(cache.EntryCount <= cache.MaxEntries, "shell icon cache entry limit");
+    Assert(cache.EstimatedBytes <= cache.MaxEstimatedBytes, "shell icon cache byte limit");
+}
+
+static void TestMemoryDiagnostics(string root)
+{
+    var entryPath = Path.Combine(root, "memory-entry.txt");
+    File.WriteAllText(entryPath, "memory");
+    var entry = new FileEntry("memory-entry.txt", entryPath, false);
+    var metadataTask = typeof(FileEntry).GetField("_metadataLoadTask",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+    entry.EnsureIconLoadedOnly();
+    Assert(metadataTask?.GetValue(entry) is null,
+        "icon-only visible data loading does not start metadata work");
+    entry.EnsureVisibleDataLoaded();
+    Assert(metadataTask?.GetValue(entry) is not null,
+        "full visible data loading retains metadata compatibility");
+    var icon = ShellIconService.GetIcon(entryPath, isDirectory: false);
+    var property = typeof(FileEntry).GetProperty(nameof(FileEntry.IconSource));
+    property?.SetValue(entry, icon);
+    entry.ReleaseVisibleIcon();
+    Assert(entry.IconSource is null, "file entry releases recycled visible icon");
+    property?.SetValue(entry, icon);
+    entry.Dispose();
+    Assert(entry.IconSource is null, "file entry dispose clears icon");
+
+    var snapshot = MemoryDiagnosticsService.Capture("smoke", 2, 3);
+    Assert(snapshot.WorkingSetBytes > 0 && snapshot.WorkingSetPrivateBytes > 0 && snapshot.PrivateMemoryBytes > 0,
+        "memory snapshot process values");
+    Assert(snapshot.WorkingSetPrivateBytes <= snapshot.WorkingSetBytes,
+        "memory snapshot private working set is bounded by working set");
+    Assert(snapshot.ManagedHeapBytes >= 0 && snapshot.GcCommittedBytes >= 0, "memory snapshot GC values");
+    Assert(snapshot.DesktopPresentationMode is "Native" or "Wpf", "memory snapshot desktop presentation mode");
+    Assert(snapshot.LayoutWindowCount == 2 && snapshot.FileEntryCount == 3, "memory snapshot layout counts");
+    Assert(snapshot.IconCache.EntryCount <= snapshot.IconCache.MaxEntries, "memory snapshot cache count");
+    Assert(snapshot.ToLogMessage().Contains("phase=smoke", StringComparison.Ordinal), "memory snapshot log format");
+    Assert(!MemoryDiagnosticsService.TrimNativeDesktopWorkingSet(),
+        "normal WPF presentation never performs native desktop working-set trim");
+}
+
+static void TestNativeDesktopLayout()
+{
+    var items = Enumerable.Range(0, 10)
+        .Select(index => new DesktopPresentationItem(
+            $"item-{index}", $"C:\\item-{index}", false, "File", "1 KB", "today", false))
+        .ToArray();
+    var snapshot = new DesktopPresentationSnapshot(
+        Guid.NewGuid(), "native layout", GroupKind.Empty, LayoutViewMode.MediumIcons,
+        false, 0, [], items);
+
+    var first = NativeDesktopLayout.GetItemRect(snapshot, 0, 200);
+    var third = NativeDesktopLayout.GetItemRect(snapshot, 2, 200);
+    Assert(first.Top == NativeDesktopLayout.HeaderHeight, "native layout header offset");
+    Assert(third.Top > first.Top, "native layout wraps items into following row");
+    Assert(NativeDesktopLayout.HitTestIndex(snapshot, first.Left + 1, first.Top + 1, 200) == 0,
+        "native layout hit test identifies item");
+    Assert(NativeDesktopLayout.HitTestIndex(snapshot, 1, 1, 200) == -1,
+        "native layout excludes title bar from item hit testing");
+    var contentHeight = NativeDesktopLayout.GetContentHeight(snapshot, 200);
+    Assert(NativeDesktopLayout.ClampScrollOffset(snapshot, int.MaxValue, 200, 100) == contentHeight - 100,
+        "native layout clamps scroll offset to content boundary");
+    Assert(NativeDesktopLayout.ClampScrollOffset(snapshot, -1, 200, 100) == 0,
+        "native layout clamps negative scroll offset");
+}
+
+static void TestDesktopSelectionState()
+{
+    var state = new DesktopSelectionState();
+    var paths = new[] { "C:\\one", "C:\\two", "C:\\three", "C:\\four" };
+    var changes = 0;
+    state.Changed += (_, _) => changes++;
+
+    state.Select(paths[1], toggle: false, extend: false, paths);
+    Assert(state.Paths.SetEquals([paths[1]]) && state.FocusedPath == paths[1],
+        "selection state stores single selection and focus");
+    state.Select(paths[3], toggle: false, extend: true, paths);
+    Assert(state.Paths.SetEquals([paths[1], paths[2], paths[3]]) && state.FocusedPath == paths[3],
+        "selection state creates shift range without WPF containers");
+    state.Select(paths[2], toggle: true, extend: false, paths);
+    Assert(!state.Paths.Contains(paths[2]) && state.Paths.Count == 2,
+        "selection state toggles an item");
+    state.Replace([paths[0]], paths[0]);
+    Assert(state.Paths.SetEquals([paths[0]]) && changes >= 4,
+        "selection state signals independent presentation updates");
 }
 
 static void WriteTestBitmap(string path, int width, int height)
@@ -1118,6 +1241,109 @@ static void TestDesktopWindowStyle(string root)
             if (detectedDesktopHost == nint.Zero || detectedProcessName != "explorer")
                 throw new InvalidOperationException(
                     $"WorkerW host detection returns Explorer window | host=0x{detectedDesktopHost.ToInt64():X} pid={detectedHostProcessId} process={detectedProcessName}");
+            using (var nativeWindow = new NativeDesktopWindow(cornerRadius: 8))
+            {
+                string? selectedPath = null;
+                int? navigationKey = null;
+                string? draggedPath = null;
+                var layoutMenuRequested = false;
+                var boundsChanged = 0;
+                var nativeDefinition = new GroupDefinition { Title = "native persistence" };
+                using var nativeController = new GroupContainer(nativeDefinition, animationsEnabled: false);
+                nativeWindow.Create(new NativeDesktopBounds(-12000, -12000, 360, 240));
+                nativeWindow.Update(new DesktopPresentationSnapshot(
+                    Guid.NewGuid(), "native smoke", GroupKind.Empty, LayoutViewMode.MediumIcons,
+                    false, 0, [],
+                    [new DesktopPresentationItem("item", "C:\\native-smoke", false, "File", "1 KB", "today", false)]));
+                nativeWindow.ItemSelectionRequested += (path, _, _) => selectedPath = path;
+                nativeWindow.NavigationRequested += (key, _, _) => navigationKey = key;
+                nativeWindow.ItemDragRequested += path => draggedPath = path;
+                nativeWindow.LayoutMenuRequested += _ => layoutMenuRequested = true;
+                nativeWindow.BoundsChanged += (_, _) => boundsChanged++;
+                nativeController.BindNativeDesktopWindow(nativeWindow);
+                nativeWindow.Update(new DesktopPresentationSnapshot(
+                    Guid.NewGuid(), "native smoke", GroupKind.Empty, LayoutViewMode.MediumIcons,
+                    false, 0, [],
+                    [new DesktopPresentationItem("item", "C:\\native-smoke", false, "File", "1 KB", "today", false)]));
+                nativeWindow.Show();
+                PumpDispatcher(TimeSpan.FromMilliseconds(40));
+                Assert(nativeWindow.IsVisible && nativeWindow.Handle != nint.Zero,
+                    "top-level native desktop window creates and shows its own HWND");
+                var nativeStyle = TestNativeMethods.GetWindowLongPtr(nativeWindow.Handle, -20).ToInt64();
+                Assert((nativeStyle & 0x00000080L) != 0 && (nativeStyle & 0x00000008L) == 0,
+                    "top-level native desktop window remains a non-topmost tool window");
+                TestNativeMethods.SendMessage(nativeWindow.Handle, 0x0201, nint.Zero, new nint((52 << 16) | 12));
+                TestNativeMethods.SendMessage(nativeWindow.Handle, 0x0100, new nint(0x28), nint.Zero);
+                Assert(selectedPath == "C:\\native-smoke" && navigationKey == 0x28,
+                    "top-level native desktop window dispatches selection and keyboard navigation");
+                TestNativeMethods.SendMessage(nativeWindow.Handle, 0x0201, nint.Zero, new nint((52 << 16) | 12));
+                TestNativeMethods.SendMessage(nativeWindow.Handle, 0x0200, new nint(0x0001), new nint((68 << 16) | 30));
+                Assert(draggedPath == "C:\\native-smoke", "top-level native desktop window dispatches item drag start");
+                TestNativeMethods.SendMessage(nativeWindow.Handle, 0x0205, nint.Zero, new nint((20 << 16) | 320));
+                Assert(layoutMenuRequested, "top-level native desktop window dispatches blank-area layout menu");
+                var firstTab = Guid.NewGuid();
+                var secondTab = Guid.NewGuid();
+                Guid? activatedTab = null;
+                nativeWindow.TabActivated += tab => activatedTab = tab;
+                nativeWindow.Update(new DesktopPresentationSnapshot(
+                    Guid.NewGuid(), "native tabs", GroupKind.Empty, LayoutViewMode.MediumIcons,
+                    false, 0,
+                    [new DesktopPresentationTab(firstTab, "first", true), new DesktopPresentationTab(secondTab, "second", false)],
+                    []));
+                TestNativeMethods.SendMessage(nativeWindow.Handle, 0x0201, nint.Zero, new nint((12 << 16) | 116));
+                Assert(activatedTab == secondTab, "top-level native desktop window dispatches tab activation");
+                nativeWindow.SetBounds(new NativeDesktopBounds(-12020, -12010, 380, 260));
+                PumpDispatcher(TimeSpan.FromMilliseconds(20));
+                Assert(nativeWindow.Bounds.Width == 380 && nativeWindow.Bounds.Height == 260 && boundsChanged > 0,
+                    "top-level native desktop window reports persisted move and resize bounds");
+                Assert(nativeDefinition.DesktopX == -12020 && nativeDefinition.DesktopY == -12010 &&
+                    nativeDefinition.Width == 380 && nativeDefinition.Height == 260,
+                    "native desktop window bounds flow through existing layout persistence model");
+                nativeWindow.DockEdge = DockEdge.Left;
+                nativeWindow.HideToEdge();
+                Assert(nativeWindow.IsEdgeHidden, "top-level native desktop window hides to configured edge");
+                nativeWindow.RevealFromEdge();
+                Assert(!nativeWindow.IsEdgeHidden, "top-level native desktop window reveals from configured edge");
+                var dpiSuggestedBounds = System.Runtime.InteropServices.Marshal.AllocHGlobal(sizeof(int) * 4);
+                try
+                {
+                    System.Runtime.InteropServices.Marshal.WriteInt32(dpiSuggestedBounds, 0, -12040);
+                    System.Runtime.InteropServices.Marshal.WriteInt32(dpiSuggestedBounds, sizeof(int), -12030);
+                    System.Runtime.InteropServices.Marshal.WriteInt32(dpiSuggestedBounds, sizeof(int) * 2, -11620);
+                    System.Runtime.InteropServices.Marshal.WriteInt32(dpiSuggestedBounds, sizeof(int) * 3, -11750);
+                    TestNativeMethods.SendMessage(nativeWindow.Handle, 0x02E0, nint.Zero, dpiSuggestedBounds);
+                }
+                finally { System.Runtime.InteropServices.Marshal.FreeHGlobal(dpiSuggestedBounds); }
+                Assert(nativeWindow.Bounds.Width == 420 && nativeWindow.Bounds.Height == 280,
+                    "top-level native desktop window applies WM_DPICHANGED suggested bounds");
+                nativeWindow.Hide();
+                Assert(!nativeWindow.IsVisible, "top-level native desktop window hides without WPF host");
+            }
+            var controllerDefinition = new GroupDefinition { Title = "native controller", Width = 320, Height = 200 };
+            using (var controllerGroup = new ZDesk.Controls.GroupContainer(controllerDefinition, animationsEnabled: false))
+            using (var controller = new ZDesk.Services.NativeDesktopWindowController(
+                       controllerGroup, new ZDesk.Windows.NativeDesktopBounds(-12100, -12100, 320, 200)))
+            {
+                controller.Show();
+                controller.Refresh();
+                Assert(controller.Window.IsVisible && controller.Window.Handle != nint.Zero,
+                    "native desktop controller owns and refreshes an independent window");
+            }
+            DesktopRenderingOptions.UseNativeTopLevel = true;
+            try
+            {
+                using var detachedHostGroup = new ZDesk.Controls.GroupContainer(
+                    new GroupDefinition { Title = "native detached host" }, animationsEnabled: false);
+                var detachedList = (System.Windows.Controls.ListBox?)detachedHostGroup.FindName("FileList");
+                Assert(detachedList is null || detachedList.ItemsSource is null,
+                    "top-level native presentation does not bind the detached WPF file list");
+                Assert(detachedList is null || detachedList.Parent is null,
+                    "top-level native presentation does not mount the detached WPF list control");
+            }
+            finally
+            {
+                DesktopRenderingOptions.UseNativeTopLevel = false;
+            }
             var definition = new GroupDefinition { Title = "style test", Height = 320 };
             var mappingDefinition = new GroupDefinition
             {
@@ -1301,6 +1527,14 @@ static void TestDesktopWindowStyle(string root)
             fileList.SelectAll();
             PumpDispatcher(TimeSpan.FromMilliseconds(40));
             Assert(shellSelectionRequests == 0, "layout SelectAll stays inside the WPF selection model");
+            selectionWindow.HideAnimated();
+            PumpDispatcher(TimeSpan.FromMilliseconds(360));
+            Assert(!selectionWindow.IsVisualTreeAttached && selectionWindow.Content is null,
+                "hidden layout detaches its WPF visual tree");
+            selectionWindow.ShowAnimated();
+            PumpDispatcher(TimeSpan.FromMilliseconds(80));
+            Assert(selectionWindow.IsVisualTreeAttached && ReferenceEquals(selectionWindow.Content, selectionWindow.Group),
+                "shown layout reattaches its existing WPF visual tree");
             selectionWindow.Close();
 
             var dockDefinition = new GroupDefinition
@@ -1493,4 +1727,7 @@ static class TestNativeMethods
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     public static extern bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern nint SendMessage(nint window, uint message, nint wParam, nint lParam);
 }
