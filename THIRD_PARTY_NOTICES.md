@@ -5,3 +5,9 @@
 QRCode recognition uses [ZXingCpp](https://github.com/zxing-cpp/zxing-cpp), copyright the ZXing-C++ contributors.
 
 ZXingCpp is licensed under the Apache License, Version 2.0. A copy of the license is available at https://www.apache.org/licenses/LICENSE-2.0.
+
+## HtmlAgilityPack 1.13.0
+
+Memo HTML clipboard fragments are parsed with [HtmlAgilityPack](https://github.com/zzzprojects/html-agility-pack), copyright ZZZ Projects Inc.
+
+HtmlAgilityPack is licensed under the MIT License. The license is available at https://github.com/zzzprojects/html-agility-pack/blob/master/LICENSE.

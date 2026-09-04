@@ -1,0 +1,210 @@
+<Window x:Class="ZDesk.Windows.MemoWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Z-Desk 备忘录" Width="720" Height="560" MinWidth="480" MinHeight="320"
+        WindowStartupLocation="Manual" WindowStyle="None" ResizeMode="CanResizeWithGrip"
+        ShowInTaskbar="False" Topmost="True" Background="#FF1E1F26"
+        Foreground="#FFF3F4F8" FontFamily="Segoe UI Variable Text, Segoe UI"
+        PreviewKeyDown="Window_PreviewKeyDown" Closing="Window_Closing"
+        SourceInitialized="Window_SourceInitialized">
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="0" ResizeBorderThickness="6" CornerRadius="0" GlassFrameThickness="0" UseAeroCaptionButtons="False" />
+    </WindowChrome.WindowChrome>
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Foreground" Value="#FFEFF2F8" />
+            <Setter Property="Background" Value="#FF20232C" />
+            <Setter Property="BorderBrush" Value="#FF40434F" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="9,5" />
+            <Setter Property="Margin" Value="0,0,5,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Background" Value="#FF303746" /></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Background" Value="#FF3A66B6" /></Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="#FF6F9CDD" /></Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Surface" Property="Opacity" Value="0.42" /></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="CardDeleteButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Width" Value="28" />
+            <Setter Property="Height" Value="28" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Foreground" Value="#FFB5B6C1" />
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Foreground" Value="#FFF3F4F8" />
+            <Setter Property="Background" Value="#FF20232C" />
+            <Setter Property="BorderBrush" Value="#FF40434F" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="7,4" />
+            <Setter Property="Margin" Value="0,0,5,0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleButton" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                                          IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" ClickMode="Press">
+                                <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="22" /></Grid.ColumnDefinitions>
+                                    <ContentPresenter Margin="{TemplateBinding Padding}" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"
+                                                      Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" />
+                                    <Path Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" Fill="#FFD7D9E0" Data="M 0 0 L 7 0 L 3.5 4 Z" />
+                                </Grid>
+                            </ToggleButton>
+                            <Popup Placement="Bottom" AllowsTransparency="True" IsOpen="{TemplateBinding IsDropDownOpen}">
+                                <Border MinWidth="{Binding ActualWidth, ElementName=ToggleButton}" MaxHeight="220" Background="#FF20232C" BorderBrush="#FF596071" BorderThickness="1">
+                                    <ScrollViewer Padding="2"><StackPanel IsItemsHost="True" /></ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Foreground" Value="#FFF3F4F8" />
+            <Setter Property="Background" Value="#FF1B1D24" />
+            <Setter Property="BorderBrush" Value="#FF40434F" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="8,5" />
+            <Style.Triggers>
+                <Trigger Property="IsKeyboardFocused" Value="True">
+                    <Setter Property="BorderBrush" Value="#FF6F9CDD" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#FFF3F4F8" />
+            <Setter Property="Background" Value="#FF20232C" />
+            <Setter Property="Padding" Value="7,4" />
+        </Style>
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0,0,0,8" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Foreground" Value="#FFF3F4F8" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <Border x:Name="ItemSurface" Background="Transparent" BorderBrush="Transparent"
+                                BorderThickness="1" CornerRadius="7" Padding="0">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ItemSurface" Property="BorderBrush" Value="#FF596071" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="ItemSurface" Property="BorderBrush" Value="#FF4A82D8" />
+                                <Setter TargetName="ItemSurface" Property="Background" Value="#142E4E7A" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="ItemSurface" Property="BorderBrush" Value="#FF6F9CDD" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="50" /><RowDefinition Height="44" /><RowDefinition Height="*" /><RowDefinition Height="27" /></Grid.RowDefinitions>
+        <Border Grid.Row="0" Background="#FF171820" BorderBrush="#FF353741" BorderThickness="0,0,0,1" MouseLeftButtonDown="Header_MouseLeftButtonDown">
+            <Grid Margin="12,0,8,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <Button x:Name="BackButton" Content="‹" Width="32" Height="30" Padding="0" Margin="0,0,8,0" Visibility="Collapsed" Click="BackButton_Click" ToolTip="返回笔记列表" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="TitleText" Text="备忘录" FontSize="15" FontWeight="SemiBold" />
+                    <TextBlock x:Name="SubtitleText" Text="  ·  便笺列表" Margin="8,0,0,0" FontSize="11" Foreground="#FFB5B6C1" VerticalAlignment="Center" />
+                </StackPanel>
+                <TextBox x:Name="SearchTextBox" Grid.Column="2" Width="190" Height="32" Margin="0,0,8,0" VerticalContentAlignment="Center" ToolTip="搜索笔记" TextChanged="SearchTextBox_TextChanged" />
+                <Button x:Name="NewNoteButton" Grid.Column="3" Content="＋ 新建" Height="30" Click="NewNoteButton_Click" />
+                <Button x:Name="DeleteCurrentButton" Grid.Column="4" Content="删除" Height="30" Visibility="Collapsed" Click="DeleteCurrentButton_Click" />
+                <Button Grid.Column="5" Content="×" Width="32" Height="30" Padding="0" Margin="0" Click="HideButton_Click" ToolTip="隐藏" />
+            </Grid>
+        </Border>
+        <Border x:Name="DetailToolbarPanel" Grid.Row="1" Background="#FF202129" BorderBrush="#FF353741" BorderThickness="0,0,0,1" Padding="10,7" Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal">
+                <Button Content="撤销" Click="Undo_Click" />
+                <Button Content="重做" Click="Redo_Click" />
+                <Separator Width="1" Margin="4,2,8,2" Background="#FF40434F" />
+                <ComboBox x:Name="BlockStyleCombo" Width="94" SelectionChanged="BlockStyle_Changed">
+                    <ComboBoxItem Content="正文" Tag="body" IsSelected="True" />
+                    <ComboBoxItem Content="标题 1" Tag="h1" />
+                    <ComboBoxItem Content="标题 2" Tag="h2" />
+                </ComboBox>
+                <Button Content="粗体" FontWeight="Bold" Click="Bold_Click" />
+                <Button Content="斜体" FontStyle="Italic" Click="Italic_Click" />
+                <Button Content="下划线" Click="Underline_Click" />
+                <Button Content="• 列表" Click="Bullets_Click" />
+                <Button Content="1. 列表" Click="Numbering_Click" />
+                <Button Content="链接" Click="Link_Click" />
+                <Button Content="`代码`" FontFamily="Cascadia Mono, Consolas" Click="InlineCode_Click" />
+                <Button Content="代码块" Click="CodeBlock_Click" Margin="0" />
+            </StackPanel>
+        </Border>
+        <Grid Grid.Row="2">
+            <Grid x:Name="ListPanel" Margin="12,12,12,8">
+                <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                <ListBox x:Name="NoteListBox" Background="Transparent" BorderThickness="0" SelectionChanged="NoteListBox_SelectionChanged" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="#FF252832" BorderBrush="#FF3B3E4A" BorderThickness="1" CornerRadius="7" Padding="10">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="112" /><ColumnDefinition Width="28" /></Grid.ColumnDefinitions>
+                                    <StackPanel Margin="0,0,8,0">
+                                        <TextBlock Text="{Binding Title}" FontSize="14" FontWeight="SemiBold" Foreground="#FFF3F4F8" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding PreviewText}" Margin="0,6,0,5" Foreground="#FFD0D2DA" TextWrapping="Wrap" MaxHeight="40" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{Binding UpdatedText}" FontSize="10.5" Foreground="#FF979AA7" />
+                                    </StackPanel>
+                                    <Image Grid.Column="1" Source="{Binding PreviewImage}" Visibility="{Binding PreviewVisibility}" Width="112" Height="72" Stretch="UniformToFill" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                    <Button Grid.Column="2" Style="{StaticResource CardDeleteButton}" Tag="{Binding}" Content="×" Click="DeleteNoteButton_Click" ToolTip="永久删除" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+                <StackPanel x:Name="EmptyStatePanel" Grid.Row="1" HorizontalAlignment="Center" Margin="0,18,0,14">
+                    <TextBlock Text="还没有便笺" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" />
+                    <TextBlock Text="新建一条笔记，记录文字、链接、代码或图片。" Foreground="#FFB5B6C1" Margin="0,5,0,10" />
+                    <Button Content="＋ 新建便笺" HorizontalAlignment="Center" Click="NewNoteButton_Click" />
+                </StackPanel>
+            </Grid>
+            <Border x:Name="DetailPanel" Margin="12" Background="#FF1B1D24" BorderBrush="#FF40434F" BorderThickness="1" CornerRadius="5" Visibility="Collapsed">
+                <RichTextBox x:Name="Editor" Margin="10" Padding="4" Background="Transparent" BorderThickness="0"
+                             Foreground="#FFF3F4F8" FontSize="14" AcceptsTab="True" VerticalScrollBarVisibility="Auto"
+                             HorizontalScrollBarVisibility="Disabled" SpellCheck.IsEnabled="False"
+                             SelectionChanged="Editor_SelectionChanged" TextChanged="Editor_TextChanged"
+                             PreviewKeyDown="Editor_PreviewKeyDown" PreviewMouseLeftButtonDown="Editor_PreviewMouseLeftButtonDown" />
+            </Border>
+        </Grid>
+        <TextBlock Grid.Row="3" x:Name="StatusText" Margin="14,0" Foreground="#FFB5B6C1" FontSize="11" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+        <Popup x:Name="LinkPopup" Placement="Mouse" StaysOpen="False" AllowsTransparency="True">
+            <Border Background="#FF202129" BorderBrush="#FF596071" BorderThickness="1" CornerRadius="6" Padding="12" Width="300">
+                <StackPanel>
+                    <TextBlock Text="插入链接" FontWeight="SemiBold" Margin="0,0,0,8" />
+                    <TextBox x:Name="LinkLabelTextBox" Height="32" Margin="0,0,0,7" ToolTip="显示文字" />
+                    <TextBox x:Name="LinkUrlTextBox" Height="32" Margin="0,0,0,9" ToolTip="https://..." />
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Content="取消" Click="CancelLink_Click" />
+                        <Button Content="插入" Margin="0" Background="#FF3566B6" BorderBrush="#FF6F9CDD" Click="ApplyLink_Click" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Popup>
+    </Grid>
+</Window>

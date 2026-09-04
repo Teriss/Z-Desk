@@ -26,6 +26,7 @@
     <EmbeddedResource Include="$(IntermediateOutputPath)ZDeskWatchdog.exe"
                       LogicalName="ZDesk.Native.ZDeskWatchdog.exe" />
     <PackageReference Include="ZXingCpp" Version="0.5.3" />
+    <PackageReference Include="HtmlAgilityPack" Version="1.13.0" />
   </ItemGroup>
 
   <Target Name="BuildNativeWatchdog" BeforeTargets="PrepareResources">

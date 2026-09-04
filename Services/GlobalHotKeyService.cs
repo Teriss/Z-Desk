@@ -34,8 +34,12 @@ public sealed class GlobalHotKeyService : IDisposable
     }
 
     public bool ReplaceAll(IReadOnlyList<(int BindingId, HotKeyGesture Gesture)> bindings, out string error)
+        => ReplaceAll(bindings, out _, out error);
+
+    public bool ReplaceAll(IReadOnlyList<(int BindingId, HotKeyGesture Gesture)> bindings, out int? failedBindingId, out string error)
     {
         error = string.Empty;
+        failedBindingId = null;
         if (_windowHandle == nint.Zero)
         {
             error = "主窗口尚未准备好。";
@@ -57,6 +61,7 @@ public sealed class GlobalHotKeyService : IDisposable
             while (registered.ContainsKey(nativeId)) nativeId++;
             if (!RegisterGesture(nativeId, gesture))
             {
+                failedBindingId = bindingId;
                 foreach (var id in registered.Keys) UnregisterHotKey(_windowHandle, id);
                 foreach (var (oldId, oldBinding) in previous) RegisterGesture(oldId, oldBinding.Gesture);
                 _registered.Clear();

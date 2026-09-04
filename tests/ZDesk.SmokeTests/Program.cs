@@ -36,6 +36,7 @@ try
     TestLockedLayoutOptions();
     await TestLayoutItemStateRepairAsync(normalizedTestRoot);
     await TestHotKeyAndDockPersistenceAsync(normalizedTestRoot);
+    await TestMemoSupportAsync(normalizedTestRoot);
     await TestLayoutBackupAsync(normalizedTestRoot);
     await TestFirstRunPresetsAsync(normalizedTestRoot);
     await TestStorageMigrationAsync(normalizedTestRoot);
@@ -390,6 +391,133 @@ static void TestHotKeyParser()
 
     Assert(!HotKeyParser.TryParse("T", out _, out _), "modifier-less hotkey rejected");
     Assert(!HotKeyParser.TryParse("Ctrl+Alt+T+Y", out _, out _), "multi-key hotkey rejected");
+}
+
+static async Task TestMemoSupportAsync(string root)
+{
+    var directory = Path.Combine(root, "memo-state");
+    var store = new MemoNotebookStore(directory);
+    var first = new MemoNoteMetadata { Title = "First", PreviewText = "first memo", SearchText = "first memo" };
+    var second = new MemoNoteMetadata { Title = "Second", PreviewText = "second memo", SearchText = "second memo" };
+    await store.SaveNoteAsync(first, "first memo"u8.ToArray(), null);
+    await store.SaveIndexAsync(new MemoNotebookIndex { Notes = [first] });
+    await store.SaveNoteAsync(first, "first memo updated"u8.ToArray(), null);
+    first.PreviewText = "first memo updated";
+    first.SearchText = first.PreviewText;
+    first.CaretOffset = 7;
+    first.UpdatedAtUtc = DateTime.UtcNow.AddMinutes(1);
+    await store.SaveIndexAsync(new MemoNotebookIndex { Notes = [first] });
+    var files = await store.LoadNoteAsync(first.Id);
+    Assert(System.Text.Encoding.UTF8.GetString(files.Primary!) == "first memo updated", "memo primary note persists");
+    Assert(System.Text.Encoding.UTF8.GetString(files.Backup!) == "first memo", "memo note backup persists");
+    await store.SaveNoteAsync(second, "second memo"u8.ToArray(), null);
+    second.UpdatedAtUtc = first.UpdatedAtUtc.AddMinutes(1);
+    var index = new MemoNotebookIndex { Notes = [second, first] };
+    await store.SaveIndexAsync(index);
+    await store.SaveIndexAsync(index);
+    var loadedIndex = await store.LoadAsync();
+    Assert(loadedIndex.Index.Notes.Count == 2 && loadedIndex.Index.Notes[0].Id == second.Id && loadedIndex.Index.Notes[1].CaretOffset == 7, "memo notebook index persists, orders notes and restores caret metadata");
+    await File.WriteAllTextAsync(store.IndexFile, "broken index");
+    var recoveredIndex = await store.LoadAsync();
+    Assert(recoveredIndex.RecoveredFromBackup && recoveredIndex.Index.Notes.Count == 2, "memo index backup recovery");
+    await File.WriteAllTextAsync(store.IndexBackupFile, "broken backup index");
+    var rebuiltIndex = await store.LoadAsync();
+    Assert(rebuiltIndex.RebuiltFromPackages && rebuiltIndex.Index.Notes.Count == 2, "memo index rebuild from note packages");
+    await File.WriteAllTextAsync(Path.Combine(store.MemoDirectory, first.PackageFileName), "corrupted package");
+    await store.PreserveCorruptNoteAsync(first);
+    Assert(Directory.EnumerateFiles(store.MemoDirectory, $"{first.Id:N}.broken-*.xamlpackage").Any(), "memo corrupt note is preserved");
+    await store.DeleteNoteAsync(second);
+    Assert(!File.Exists(Path.Combine(store.MemoDirectory, second.PackageFileName)), "memo note deletion removes body");
+
+    var legacyStore = new MemoNotebookStore(Path.Combine(root, "memo-legacy-package"));
+    Directory.CreateDirectory(legacyStore.StateDirectory);
+    await File.WriteAllBytesAsync(legacyStore.LegacyDocumentFile, "legacy memo"u8.ToArray());
+    var legacy = await legacyStore.LoadLegacyAsync();
+    Assert(legacy.Primary is not null, "memo legacy package is discoverable");
+    await legacyStore.ArchiveLegacyAsync();
+    Assert(File.Exists(Path.Combine(legacyStore.StateDirectory, "memo.legacy.xamlpackage")), "memo legacy package archives after migration");
+
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            var text = MemoPasteService.CreateTextFragment("see https://example.test/a and `code`\n```\nhttps://example.test/in-code\n```");
+            Assert(text.Blocks.OfType<System.Windows.Documents.Paragraph>().Any(paragraph => paragraph.Inlines.OfType<System.Windows.Documents.Hyperlink>().Any()),
+                "memo plain text recognizes links");
+            Assert(text.Blocks.OfType<System.Windows.Documents.Paragraph>().Any(paragraph => paragraph.FontFamily.Source.Contains("Cascadia", StringComparison.OrdinalIgnoreCase)),
+                "memo plain text creates code paragraph");
+            var unfinished = MemoPasteService.CreateTextFragment("```\nhttps://inside.example\n");
+            Assert(new System.Windows.Documents.TextRange(unfinished.ContentStart, unfinished.ContentEnd).Text.Contains("```", StringComparison.Ordinal)
+                && !unfinished.Blocks.OfType<System.Windows.Documents.Paragraph>()
+                    .SelectMany(paragraph => paragraph.Inlines.OfType<System.Windows.Documents.Hyperlink>()).Any(),
+                "memo unfinished fence stays plain text");
+
+            var html = MemoPasteService.CreateHtmlFragment("<p><strong>bold</strong> <a href='https://example.test'>link</a></p><script>bad()</script><a href='javascript:alert(1)'>unsafe</a>");
+            var htmlText = new System.Windows.Documents.TextRange(html.ContentStart, html.ContentEnd).Text;
+            Assert(htmlText.Contains("bold", StringComparison.Ordinal) && htmlText.Contains("unsafe", StringComparison.Ordinal),
+                "memo HTML keeps safe text");
+            Assert(!html.Blocks.OfType<System.Windows.Documents.Paragraph>().SelectMany(paragraph => paragraph.Inlines.OfType<System.Windows.Documents.Hyperlink>()).Any(link => link.NavigateUri?.Scheme == "javascript"),
+                "memo HTML rejects dangerous links");
+
+            var memoWindow = new MemoWindow();
+            Assert(memoWindow.Topmost && !memoWindow.ShowInTaskbar && memoWindow.MinWidth == 480 && memoWindow.MinHeight == 320,
+                "memo window uses topmost utility-window bounds");
+            var deleteWindow = new MemoDeleteConfirmWindow("First");
+            Assert(deleteWindow.Topmost && !deleteWindow.ShowInTaskbar && deleteWindow.Background is not null,
+                "memo delete confirmation uses the dark utility-window theme");
+            var snapshotRange = new System.Windows.Documents.TextRange(memoWindow.EditorControl.Document.ContentStart, memoWindow.EditorControl.Document.ContentEnd);
+            snapshotRange.Text = "First title\r\nA searchable summary";
+            var snapshot = memoWindow.CaptureContentSnapshot();
+            Assert(snapshot.Title == "First title" && snapshot.PreviewText.Contains("searchable", StringComparison.Ordinal),
+                "memo card title and summary derive from document");
+            memoWindow.SetNotes([new MemoNoteCard(first, null)]);
+            memoWindow.ShowList();
+            Assert(memoWindow.CurrentNoteId is null, "memo starts in list view");
+            memoWindow.ShowDetail(first);
+            Assert(memoWindow.CurrentNoteId == first.Id, "memo opens note detail in same window");
+            memoWindow.ShowList();
+            var clipboardData = new System.Windows.DataObject();
+            clipboardData.SetData(System.Windows.DataFormats.UnicodeText, "paste https://example.test");
+            Assert(MemoPasteService.TryPaste(memoWindow.EditorControl, clipboardData, out _), "memo text paste is handled");
+            Assert(new System.Windows.Documents.TextRange(memoWindow.EditorControl.Document.ContentStart, memoWindow.EditorControl.Document.ContentEnd).Text.Contains("paste", StringComparison.Ordinal),
+                "memo pasted text reaches editor");
+            Assert(memoWindow.EditorControl.Document.Blocks.OfType<System.Windows.Documents.Paragraph>()
+                .SelectMany(paragraph => paragraph.Inlines.OfType<System.Windows.Documents.Hyperlink>()).Any(),
+                "memo pasted URL becomes hyperlink");
+            var pixels = new byte[] { 0x40, 0x80, 0xC0, 0xFF };
+            var bitmap = System.Windows.Media.Imaging.BitmapSource.Create(1, 1, 96, 96,
+                System.Windows.Media.PixelFormats.Bgra32, null, pixels, 4);
+            var imageData = new System.Windows.DataObject();
+            imageData.SetData(System.Windows.DataFormats.Bitmap, bitmap);
+            Assert(MemoPasteService.TryPaste(memoWindow.EditorControl, imageData, out _), "memo bitmap paste is handled");
+            Assert(memoWindow.EditorControl.Document.Blocks.OfType<System.Windows.Documents.Paragraph>()
+                .SelectMany(paragraph => paragraph.Inlines.OfType<System.Windows.Documents.InlineUIContainer>()).Any(),
+                "memo bitmap paste becomes embedded image");
+            var package = memoWindow.SavePackage();
+            Assert(package.Length > 0 && memoWindow.LoadPackage(package), "memo window package roundtrip");
+            memoWindow.AllowClose = true;
+            memoWindow.Close();
+
+        }
+        catch (Exception ex) { failure = ex; }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    if (failure is not null) throw new InvalidOperationException("Memo formatting smoke test failed.", failure);
+
+    var legacyDirectory = Path.Combine(root, "memo-legacy-state");
+    Directory.CreateDirectory(legacyDirectory);
+    await File.WriteAllTextAsync(Path.Combine(legacyDirectory, "layout.json"), "{\"Version\":14,\"Settings\":{\"TopmostHotKeys\":[]}}");
+    var migrated = await new LayoutStore(legacyDirectory).LoadAsync();
+    Assert(migrated.Settings.MemoHotKey == "Ctrl+Alt+M", "legacy state gets default memo hotkey");
+
+    var clearedDirectory = Path.Combine(root, "memo-cleared-state");
+    var clearedStore = new LayoutStore(clearedDirectory);
+    await clearedStore.SaveAsync(new AppState { Version = AppState.CurrentVersion, Settings = new AppSettings { MemoHotKey = string.Empty } });
+    var cleared = await clearedStore.LoadAsync();
+    Assert(cleared.Settings.MemoHotKey == string.Empty, "cleared memo hotkey remains disabled");
 }
 
 static void TestQrCodeRecognition()
@@ -830,6 +958,9 @@ static async Task TestHotKeyAndDockPersistenceAsync(string root)
         Settings = new AppSettings
         {
             InteractionMode = LayoutInteractionMode.EdgeHide,
+            MemoHotKey = "Ctrl+Alt+M",
+            MemoWindowBounds = new MemoWindowBounds(-600, 140, 720, 560),
+            MemoCaretOffset = 42,
             QrRecognitionHotKey = "Ctrl+Shift+Q",
             QrRecognitionFrameBounds = new QrRecognitionFrameBounds(-800, 120, 720, 480),
             TopmostHotKeys = [new TopmostHotKeyBinding { Gesture = "Ctrl+Alt+P", LayoutIds = [tab.Id] }]
@@ -840,6 +971,8 @@ static async Task TestHotKeyAndDockPersistenceAsync(string root)
     await store.SaveAsync(state);
     var loaded = await store.LoadAsync();
     Assert(loaded.Settings.InteractionMode == LayoutInteractionMode.EdgeHide, "edge interaction mode persists");
+    Assert(loaded.Settings.MemoHotKey == "Ctrl+Alt+M" && loaded.Settings.MemoWindowBounds?.Left == -600 && loaded.Settings.MemoCaretOffset == 42,
+        "memo hotkey, window bounds and caret persist");
     Assert(loaded.Settings.QrRecognitionHotKey == "Ctrl+Shift+Q", "QR recognition hotkey persists");
     Assert(loaded.Settings.QrRecognitionFrameBounds?.Left == -800, "QR frame bounds persist");
     Assert(loaded.Settings.TopmostHotKeys.Single().LayoutIds.SequenceEqual([tab.Id]), "targeted hotkey layout persists");

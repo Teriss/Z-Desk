@@ -153,6 +153,7 @@ public partial class SettingsWindow : Window
         DisplayProfilesCheckBox.IsChecked = settings.AutoSwitchDisplayLayouts;
         StandardModeRadio.IsChecked = settings.InteractionMode == LayoutInteractionMode.Standard;
         EdgeHideModeRadio.IsChecked = settings.InteractionMode == LayoutInteractionMode.EdgeHide;
+        MemoHotKeyTextBox.Text = Result.MemoHotKey;
         QrRecognitionHotKeyTextBox.Text = Result.QrRecognitionHotKey;
         UpdateHotKeyEditorState();
         AnimationsCheckBox.IsChecked = settings.EnableAnimations;
@@ -356,6 +357,15 @@ public partial class SettingsWindow : Window
         if (SelectedHotKey is { } selected && !selected.AllLayouts)
             selected.LayoutIds = HotKeyTargetChoices.Where(choice => choice.IsSelected).Select(choice => choice.Id).ToList();
         var gestures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(Result.MemoHotKey))
+        {
+            if (!HotKeyParser.TryParse(Result.MemoHotKey, out var memoGesture, out var error) || memoGesture is null)
+            {
+                HotKeyErrorText.Text = $"备忘录快捷键配置无效：{error}";
+                return false;
+            }
+            gestures.Add(memoGesture.DisplayText);
+        }
         if (!string.IsNullOrWhiteSpace(Result.QrRecognitionHotKey))
         {
             if (!HotKeyParser.TryParse(Result.QrRecognitionHotKey, out var qrGesture, out var error) || qrGesture is null)
@@ -380,7 +390,7 @@ public partial class SettingsWindow : Window
             }
             if (!HotKeyParser.TryParse(binding.Gesture, out var gesture, out _) || gesture is null || !gestures.Add(gesture.DisplayText))
             {
-                HotKeyErrorText.Text = "二维码识别和布局置顶快捷键不能重复。";
+                HotKeyErrorText.Text = "备忘录、二维码识别和布局置顶快捷键不能重复。";
                 return false;
             }
         }
@@ -428,7 +438,10 @@ public partial class SettingsWindow : Window
             AutoRunRules = AutoRulesCheckBox.IsChecked == true,
             RunRulesOnFolderChanges = WatchRulesCheckBox.IsChecked == true,
             RuleIntervalMinutes = interval,
-        QrRecognitionHotKey = Result.QrRecognitionHotKey.Trim(),
+            MemoHotKey = Result.MemoHotKey.Trim(),
+            MemoWindowBounds = Result.MemoWindowBounds,
+            MemoCaretOffset = Result.MemoCaretOffset,
+            QrRecognitionHotKey = Result.QrRecognitionHotKey.Trim(),
             QrRecognitionFrameBounds = Result.QrRecognitionFrameBounds,
             TopmostHotKeys = Result.TopmostHotKeys.Select(CloneHotKeyBinding).ToList(),
             TopmostHotKey = null,
@@ -503,6 +516,23 @@ public partial class SettingsWindow : Window
         if (!TryRecordHotKey(e, out var gesture)) return;
         Result.QrRecognitionHotKey = gesture;
         QrRecognitionHotKeyTextBox.Text = gesture;
+        HotKeyErrorText.Text = string.Empty;
+        MarkSettingsDirty();
+    }
+
+    private void MemoHotKeyTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!TryRecordHotKey(e, out var gesture)) return;
+        Result.MemoHotKey = gesture;
+        MemoHotKeyTextBox.Text = gesture;
+        HotKeyErrorText.Text = string.Empty;
+        MarkSettingsDirty();
+    }
+
+    private void ClearMemoHotKey_Click(object sender, RoutedEventArgs e)
+    {
+        Result.MemoHotKey = string.Empty;
+        MemoHotKeyTextBox.Text = string.Empty;
         HotKeyErrorText.Text = string.Empty;
         MarkSettingsDirty();
     }
@@ -1001,6 +1031,9 @@ public partial class SettingsWindow : Window
         GroupsHidden = settings.GroupsHidden,
         RememberTopmost = false,
         AutoSwitchDisplayLayouts = settings.AutoSwitchDisplayLayouts,
+        MemoHotKey = settings.MemoHotKey,
+        MemoWindowBounds = settings.MemoWindowBounds,
+        MemoCaretOffset = settings.MemoCaretOffset,
         QrRecognitionHotKey = settings.QrRecognitionHotKey,
         QrRecognitionFrameBounds = settings.QrRecognitionFrameBounds,
         IsTopmost = false,

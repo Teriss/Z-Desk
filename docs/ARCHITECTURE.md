@@ -25,6 +25,7 @@ AppState
 - `FileEntry` 只缓存真实路径的元数据和 Shell 图标；条目进入可视区后才启动对应的 Shell 加载任务，图标换行视图由回收式虚拟化面板限制容器数量。
 - `AppSettings.TopmostHotKeys` 保存多条置顶快捷键；旧版单快捷键在 `LayoutStore` 载入时迁移为“全部布局”绑定。
 - `AppSettings.QrRecognitionHotKey` 保存二维码识别的单条全局快捷键；空值表示不注册该功能。
+- `AppSettings.MemoHotKey` 保存备忘录快捷键，`MemoWindowBounds` 保存独立窗口状态；旧配置迁移到 v15 时默认使用 `Ctrl+Alt+M`。旧单文档的 `MemoCaretOffset` 仅作为迁移输入，新的光标位置保存在每条笔记元数据。
 - `LayoutMatchRule.PathContains` 与扩展名同时参与匹配；快捷方式目标由 `ShortcutTargetService` 解析。
 - `AppSettings.InteractionMode` 控制标准吸附或 QQ 式贴边隐藏，`GroupDefinition.DockEdge` 保存左、右、上停靠边。
 
@@ -68,6 +69,8 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 
 点击“识别”或按 Enter 后，控制器隐藏取景框并调用 `ScreenCaptureService.CaptureRegion`，按显示器交集复制选区，显示器间隙填白，不创建虚拟桌面尺寸缓冲。捕获和 `QrCodeRecognitionService` 解码在后台执行；识别服务使用 ZXingCpp，仅扫描 QR Code，并对原图、对比度拉伸灰度和各颜色通道执行局部/全局二值化回退，再按定位范围合并同一二维码的重复命中。捕获异常时恢复取景框以便重试；结果窗口只提供正文复制，不执行或联网解析二维码内容。
 
+备忘录由 `MemoWindowController` 延迟创建一个置顶、不占任务栏的 WPF 窗口。窗口内部切换便笺列表和详情页，列表按最近编辑时间显示标题、摘要、首图缩略图并支持搜索；详情编辑器使用 `RichTextBox/FlowDocument`，文本、RTF/HTML 和位图通过安全转换后插入，网址、Markdown 链接、行内代码和围栏代码块在粘贴或输入完成后识别。窗口关闭只隐藏，快捷键再次唤出总是回到列表。
+
 ## 5. 持久化
 
 - `LayoutStore`：`layout.json`、备份、版本校验和损坏恢复。
@@ -76,7 +79,9 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 - `RuleHistoryService`：规则执行历史。
 - `RecoveryService`：会话异常标记。
 - `LogService`：按日期日志与保留策略。
+- `MemoNotebookStore`：便笺索引、逐笔正文包、备份、缩略图、损坏恢复和旧单文档迁移。
 - 二维码取景框边界属于用户设置，保存为 `AppSettings.QrRecognitionFrameBounds`；屏幕图像和二维码正文不是持久化数据，只在一次识别会话内驻留内存。
+- 备忘录索引保存为 `memo/index.json`，上一份索引保存为 `index.backup.json`；每条正文和备份分别使用 `{id}.xamlpackage` 与 `{id}.backup.xamlpackage`，首图缩略图使用 `{id}.preview.png`。索引无法读取时先保留损坏副本并从备份或正文包重建；正文损坏时保留带时间戳副本并回退该笔记备份。旧版顶层 `memo.xamlpackage` 会迁移为第一条笔记并归档为 `.legacy`。
 - `AppDataPathService`：路径配置、目录迁移和运行时服务切换。
 
 启动完成、延迟启动和二维码识别结束时，`MemoryDiagnosticsService` 将工作集、私有内存、托管堆、GC 已提交内存、WPF 渲染模式/等级、布局窗口与文件项数量，以及 Shell 图像缓存项数/估算字节数写入现有日志。图像缓存最多保留 256 项且估算像素内存不超过 16 MB。
@@ -98,7 +103,7 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 
 ## 8. 测试
 
-`tests/ZDesk.SmokeTests` 覆盖 Shell 重命名/复制/移动、QuickLook Provider、映射选择隔离、规则属性通知、二维码单码/多码/同文重复/旋转/反色/风格化样例识别、v13→v14 配置迁移、取景框默认尺寸/最小尺寸/夹取/工具条定位和区域捕获几何、500 条规则页 Dispatcher 响应、备份恢复、视图/排序/页签、窗口 Z 序、自动折叠、首次初始化、路径迁移和非模态设置同步。取景框穿透、八向缩放、跨 DPI 和真实视频画面仍需人工验收。
+`tests/ZDesk.SmokeTests` 覆盖 Shell 重命名/复制/移动、QuickLook Provider、映射选择隔离、规则属性通知、二维码单码/多码/同文重复/旋转/反色/风格化样例识别、v13→v14 与 v14→v15 配置迁移、备忘录多笔记索引/正文备份/损坏保留、Markdown/HTML 安全转换、取景框默认尺寸/最小尺寸/夹取/工具条定位和区域捕获几何、500 条规则页 Dispatcher 响应、备份恢复、视图/排序/页签、窗口 Z 序、自动折叠、首次初始化、路径迁移和非模态设置同步。备忘录多 DPI、外部应用粘贴、链接打开和取景框穿透仍需人工验收。
 
 ## 9. UI 主题
 

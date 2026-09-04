@@ -14,11 +14,14 @@ namespace ZDesk;
 
 public partial class MainWindow : Window
 {
+    private const int MemoHotKeyBindingId = int.MinValue + 2;
     private const int QrRecognitionHotKeyBindingId = int.MinValue + 1;
     private readonly RecoveryService _recoveryService;
     private readonly LayoutStore _layoutStore = new();
+    private readonly MemoNotebookStore _memoStore = new();
     private readonly GlobalHotKeyService _hotKeyService = new();
     private QrRecognitionFrameController? _qrFrameController;
+    private MemoWindowController? _memoController;
     private readonly DispatcherTimer _saveTimer;
     private readonly DesktopDoubleClickService _desktopDoubleClickService;
     private readonly TrayIconService _trayIconService;
@@ -118,6 +121,20 @@ public partial class MainWindow : Window
             });
         controller.RecognitionRequested += QrFrame_RecognitionRequested;
         return controller;
+    }
+
+    private MemoWindowController EnsureMemoController()
+    {
+        return _memoController ??= new MemoWindowController(
+            this,
+            _memoStore,
+            () => _state.Settings.MemoWindowBounds,
+            bounds =>
+            {
+                _state.Settings.MemoWindowBounds = bounds;
+                if (_isLoaded) ScheduleSave();
+            },
+            () => _state.Settings.MemoCaretOffset);
     }
 
     private void DesktopFiles_Changed(object? sender, DesktopFilesChangedEventArgs e)
@@ -380,6 +397,7 @@ public partial class MainWindow : Window
                 window.EnsureVisibleOnCurrentDisplays();
             }
             _qrFrameController?.RefreshDisplayLayout();
+            _memoController?.RefreshDisplayLayout();
             _desktopSurface?.EnsureVisibleBounds();
 
             StatusText.Text = "显示器配置已变化，桌面分组位置已重新校验";
@@ -391,6 +409,7 @@ public partial class MainWindow : Window
     {
         var firstRun = !_layoutStore.HasState;
         _state = await _layoutStore.LoadAsync();
+        _memoStore.SetDataDirectory(_state.Settings.DataDirectory);
         _displaySignature = _displayProfiles.GetCurrentSignature();
         // The primary layout is authoritative at startup. Loading a stale
         // same-display profile here used to overwrite changes that had already
@@ -406,7 +425,7 @@ public partial class MainWindow : Window
         var explorerIconsHidden = _explorerIconVisibility.HideAndGuard();
         UpdateToolbarState();
         _hotKeyService.Attach(this);
-            var hotKeyRegistered = TryRegisterConfiguredHotKeys(_state.Settings, out var hotKeyError);
+        var hotKeyRegistered = TryRegisterConfiguredHotKeys(_state.Settings, out var hotKeyError);
         var desktopDoubleClickReady = _desktopDoubleClickService.Start();
         StatusText.Text = GetStartupStatus(hotKeyRegistered, desktopDoubleClickReady, hotKeyError);
         _isLoaded = true;
@@ -420,6 +439,8 @@ public partial class MainWindow : Window
         {
             await ReapplyLayoutRulesAsync();
             StatusText.Text = "已创建预设布局并完成首次桌面归类";
+            if (!string.IsNullOrWhiteSpace(hotKeyError))
+                StatusText.Text += $"；{hotKeyError}";
         }
         if (_pendingDesktopMenuCreateKind is { } pendingCreateKind)
         {
@@ -439,6 +460,8 @@ public partial class MainWindow : Window
         if (_recoveryService.PreviousSessionEndedUnexpectedly)
         {
             StatusText.Text = "检测到上次异常退出，已载入最后一次有效布局；可在设置中恢复备份。";
+            if (!string.IsNullOrWhiteSpace(hotKeyError))
+                StatusText.Text += $"；{hotKeyError}";
         }
 
     }
@@ -483,6 +506,11 @@ public partial class MainWindow : Window
     private static string GetStartupStatus(bool hotKeyRegistered, bool desktopDoubleClickReady, string hotKeyError)
     {
         if (!hotKeyRegistered)
+        {
+            return $"布局已载入 · {hotKeyError}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(hotKeyError))
         {
             return $"布局已载入 · {hotKeyError}";
         }
@@ -953,9 +981,21 @@ public partial class MainWindow : Window
 
     private bool TryRegisterConfiguredHotKeys(AppSettings settings, out string error)
     {
+        return TryRegisterConfiguredHotKeys(settings, out _, out error);
+    }
+
+    private bool TryRegisterConfiguredHotKeys(AppSettings settings, out int? failedBindingId, out string error)
+    {
         error = string.Empty;
+        failedBindingId = null;
         _hotKeyBindingKeys.Clear();
         var registrations = new List<(int BindingId, HotKeyGesture Gesture)>();
+        if (!string.IsNullOrWhiteSpace(settings.MemoHotKey))
+        {
+            if (!HotKeyParser.TryParse(settings.MemoHotKey, out var memoGesture, out error) || memoGesture is null)
+                return false;
+            registrations.Add((MemoHotKeyBindingId, memoGesture));
+        }
         if (!string.IsNullOrWhiteSpace(settings.QrRecognitionHotKey))
         {
             if (!HotKeyParser.TryParse(settings.QrRecognitionHotKey, out var gesture, out error) || gesture is null)
@@ -970,16 +1010,33 @@ public partial class MainWindow : Window
                 if (!HotKeyParser.TryParse(binding.Gesture, out var gesture, out error) || gesture is null)
                     return false;
                 var key = binding.Id.GetHashCode();
-                while (key == QrRecognitionHotKeyBindingId || _hotKeyBindingKeys.ContainsKey(key)) key++;
+                while (key is MemoHotKeyBindingId or QrRecognitionHotKeyBindingId || _hotKeyBindingKeys.ContainsKey(key)) key++;
                 _hotKeyBindingKeys[key] = binding.Id;
                 registrations.Add((key, gesture));
             }
         }
-        return _hotKeyService.ReplaceAll(registrations, out error);
+        if (_hotKeyService.ReplaceAll(registrations, out failedBindingId, out error)) return true;
+        // A newly introduced default shortcut must not prevent existing
+        // bindings from working when another application already owns it.
+        if (!_isLoaded && failedBindingId == MemoHotKeyBindingId)
+        {
+            var fallback = registrations.Where(item => item.BindingId != MemoHotKeyBindingId).ToArray();
+            if (_hotKeyService.ReplaceAll(fallback, out _, out _))
+            {
+                error = $"备忘录快捷键不可用：{error}";
+                return true;
+            }
+        }
+        return false;
     }
 
     private void HotKeyBindingPressed(int key)
     {
+        if (key == MemoHotKeyBindingId)
+        {
+            _ = ToggleMemoAsync();
+            return;
+        }
         if (key == QrRecognitionHotKeyBindingId)
         {
             StartQrRecognition();
@@ -992,6 +1049,20 @@ public partial class MainWindow : Window
         if (!_activeHotKeyBindings.Add(bindingId)) _activeHotKeyBindings.Remove(bindingId);
         _topmostFromHotKey = _activeHotKeyBindings.Count > 0;
         ApplyActiveTopmostState();
+    }
+
+    private async Task ToggleMemoAsync()
+    {
+        if (!_isLoaded) return;
+        try
+        {
+            await EnsureMemoController().ToggleAsync();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException or ArgumentException or System.Xml.XmlException or System.Windows.Markup.XamlParseException)
+        {
+            LogService.Warning("Memo window toggle failed", ex);
+            StatusText.Text = $"备忘录操作失败：{ex.Message}";
+        }
     }
 
     private void StartQrRecognition()
@@ -1307,6 +1378,7 @@ public partial class MainWindow : Window
                 LayoutIds = [.. binding.LayoutIds]
             }).ToList();
             requested.QrRecognitionHotKey = previousSettings.QrRecognitionHotKey;
+            requested.MemoHotKey = previousSettings.MemoHotKey;
             TryRegisterConfiguredHotKeys(previousSettings, out _);
         }
         _activeHotKeyBindings.Clear();
@@ -1352,8 +1424,11 @@ public partial class MainWindow : Window
         if (string.Equals(currentData, newData, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(currentLogs, newLogs, StringComparison.OrdinalIgnoreCase)) return;
 
+        if (_memoController is not null) await _memoController.FlushAsync();
         await AppDataPathService.MigrateAndConfigureAsync(currentData, currentLogs, newData, newLogs);
         _layoutStore.SetStateDirectory(newData);
+        _memoStore.SetDataDirectory(newData);
+        _memoController?.SetDataDirectory(newData);
         _snapshotService.SetDataDirectory(newData);
         _displayProfiles.SetDataDirectory(newData);
         _recoveryService.SetDataDirectory(newData);
@@ -1806,8 +1881,9 @@ public partial class MainWindow : Window
         try
         {
             await SaveNowAsync();
+            if (_memoController is not null) await _memoController.FlushAsync();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException or ArgumentException or System.Xml.XmlException or System.Windows.Markup.XamlParseException)
         {
             StatusText.Text = $"退出前保存失败：{ex.Message}";
         }
@@ -1825,6 +1901,11 @@ public partial class MainWindow : Window
         _desktopSurface?.Close();
         _desktopSurface = null;
         _qrFrameController?.Dispose();
+        if (_memoController is not null)
+        {
+            _memoController.Dispose();
+            _memoController = null;
+        }
         _qrRecognitionCancellation?.Cancel();
         _qrRecognitionCancellation?.Dispose();
         _qrRecognitionCancellation = null;
