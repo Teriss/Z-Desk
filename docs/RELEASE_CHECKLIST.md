@@ -6,7 +6,7 @@
 - [x] 冒烟测试通过
 - [x] 单文件便携版生成且目录仅含 `ZDesk.exe`
 - [x] 发布文件生成 SHA-256 校验值
-- [x] 发布前核对 README 与 Release Notes 中的版本号；0.1.6 `ZDesk.exe` 73.31 MB，SHA-256 `07A8B5EF53C7CF7137EB2E7CCC7F8653AAF6BAEDB20A48B0424277B4AAFCE3FE`
+- [x] 发布前核对 README 与 Release Notes 中的版本号；0.1.7 `ZDesk.exe` 73.31 MB，SHA-256 `ADF4DF3BD2709473AEE06067706AE4AA9D2FEC537D11440CFAB6FE9F1F743C14`
 
 ## Windows 人工验收
 

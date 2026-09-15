@@ -856,20 +856,39 @@ static async Task TestLayoutPathMatchingAsync(string root)
 static void TestLockedLayoutAssignment(string root)
 {
     var lockedPath = Path.Combine(root, "locked.txt");
+    var newPath = Path.Combine(root, "new.txt");
+    var newGamePath = Path.Combine(root, "new-game.url");
     File.WriteAllText(lockedPath, "locked");
+    File.WriteAllText(newPath, "new");
+    File.WriteAllText(newGamePath, "[InternetShortcut]\nURL=steam://rungameid/123\n");
     var lockedTab = new LayoutTab { Title = "locked", IsRuleLocked = true, PinnedPaths = [lockedPath] };
     var lockedGroup = new GroupDefinition { Tabs = [lockedTab] };
     var rule = new LayoutMatchRule { GroupId = lockedTab.Id.ToString(), Extensions = ".txt", Priority = 1 };
-    var result = new LayoutAssignmentService().Preview([lockedPath], [lockedGroup], [rule]);
-    Assert(result.Count == 0, "locked layout is not a rule target");
+    var result = new LayoutAssignmentService().Preview([newPath], [lockedGroup], [rule]);
+    Assert(result.Count == 1 && result[0].TabId == lockedTab.Id,
+        "locked layout accepts a new rule target");
+    var gameRule = new LayoutMatchRule
+    {
+        GroupId = lockedTab.Id.ToString(),
+        Extensions = ".exe;.lnk;.url",
+        PathContains = "steam:"
+    };
+    var gameResult = new LayoutAssignmentService().Preview([newGamePath], [lockedGroup], [gameRule]);
+    Assert(gameResult.Count == 1 && gameResult[0].TabId == lockedTab.Id,
+        "locked layout accepts a new Steam URL target");
+    var lockedPaths = lockedTab.PinnedPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var reapplyCandidates = new[] { lockedPath, newPath }.Where(path => !lockedPaths.Contains(path));
+    var reapplyResult = new LayoutAssignmentService().Preview(reapplyCandidates, [lockedGroup], [rule]);
+    Assert(reapplyResult.Count == 1 && reapplyResult[0].Path == newPath,
+        "locked layout contents remain excluded from reassignment");
     var unlockedGroup = new GroupDefinition { Title = "unlocked" };
     var unlockedRule = new LayoutMatchRule { GroupId = unlockedGroup.Id.ToString(), Extensions = ".txt" };
-    Assert(new LayoutAssignmentService().Preview([lockedPath], [unlockedGroup], [unlockedRule]).Count == 1,
+    Assert(new LayoutAssignmentService().Preview([newPath], [unlockedGroup], [unlockedRule]).Count == 1,
         "unlocked layout remains a rule target");
     var lockedOrdinary = new GroupDefinition { IsRuleLocked = true };
     var ordinaryRule = new LayoutMatchRule { GroupId = lockedOrdinary.Id.ToString(), Extensions = ".txt" };
-    Assert(new LayoutAssignmentService().Preview([lockedPath], [lockedOrdinary], [ordinaryRule]).Count == 0,
-        "locked ordinary layout is not a rule target");
+    Assert(new LayoutAssignmentService().Preview([newPath], [lockedOrdinary], [ordinaryRule]).Count == 1,
+        "locked ordinary layout accepts a new rule target");
 
     var clone = lockedTab.Clone();
     Assert(clone.IsRuleLocked, "locked tab state cloned");
