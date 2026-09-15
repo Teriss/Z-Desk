@@ -3,7 +3,12 @@ using ZDesk.Models;
 
 namespace ZDesk.Services;
 
-/// <summary>Classifies desktop entries into existing layouts without moving files.</summary>
+/// <summary>
+/// Classifies candidate desktop entries into existing layouts without moving files.
+/// Callers provide only entries that may be reassigned; a locked layout remains a
+/// valid destination for a new entry while its existing entries are protected by
+/// the caller's candidate filtering.
+/// </summary>
 public sealed class LayoutAssignmentService
 {
     private readonly ShortcutTargetService _shortcutTargets = new();
@@ -17,10 +22,10 @@ public sealed class LayoutAssignmentService
         {
             if (group.Tabs.Count == 0)
             {
-                if (group.Kind == GroupKind.Empty && !group.IsRuleLocked) groupList[group.Id.ToString()] = (group.Id, null);
+                if (group.Kind == GroupKind.Empty) groupList[group.Id.ToString()] = (group.Id, null);
                 continue;
             }
-            foreach (var tab in group.Tabs.Where(tab => tab.Kind == GroupKind.Empty && !tab.IsRuleLocked))
+            foreach (var tab in group.Tabs.Where(tab => tab.Kind == GroupKind.Empty))
                 groupList[tab.Id.ToString()] = (group.Id, tab.Id);
         }
         var ordered = rules.Where(r => r.Enabled).OrderBy(r => r.Priority).ToArray();
