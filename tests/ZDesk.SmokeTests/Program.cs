@@ -38,6 +38,8 @@ try
     await TestHotKeyAndDockPersistenceAsync(normalizedTestRoot);
     await TestMemoSupportAsync(normalizedTestRoot);
     await TestLayoutBackupAsync(normalizedTestRoot);
+    await TestLayoutSizePersistenceAsync(normalizedTestRoot);
+    await TestDisplayLayoutChangesAsync();
     await TestFirstRunPresetsAsync(normalizedTestRoot);
     await TestStorageMigrationAsync(normalizedTestRoot);
     await TestLayoutViewModesAsync(normalizedTestRoot);
@@ -204,8 +206,8 @@ static void TestIncrementalLayoutItemSync(string root)
             app = System.Windows.Application.Current as ZDesk.App;
             if (app is null)
             {
-                app = new ZDesk.App();
-                app.InitializeComponent();
+                app = new SmokeApplication();
+                app.ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
                 ownsApp = true;
             }
             var definition = new GroupDefinition
@@ -365,6 +367,146 @@ static void TestLayoutRuleNotifications()
            changed.Contains(nameof(LayoutMatchRule.Extensions)) &&
            changed.Contains(nameof(LayoutMatchRule.PathContains)),
         "rule type emits targeted property notifications");
+}
+
+static async Task TestLayoutSizePersistenceAsync(string root)
+{
+    foreach (var mode in Enum.GetValues<LayoutViewMode>())
+    foreach (var tabbed in new[] { false, true })
+    {
+        var damaged = new GroupDefinition
+        {
+            Width = 220, Height = 36, ViewMode = mode, IsCollapsed = true,
+            Tabs = tabbed ? [new LayoutTab { ViewMode = mode }, new LayoutTab { ViewMode = mode }] : []
+        };
+        var store = new LayoutStore(Path.Combine(root, $"size-{mode}-{tabbed}"));
+        var state = new AppState { Groups = [damaged] };
+        await store.SaveAsync(state);
+        var restored = (await store.LoadAsync()).Groups.Single();
+        var minimum = LayoutSizeService.MinimumExpandedSize(restored);
+        Assert(restored.Width >= minimum.Width && restored.Height >= minimum.Height,
+            $"damaged {mode}/{tabbed} dimensions are repaired on load");
+        Assert(restored.IsCollapsed, "size repair preserves explicit collapse state");
+        var imported = await store.ImportAsync(store.StateFile);
+        Assert(imported.Groups[0].Height >= minimum.Height, "import shares expanded size validation");
+        await store.SaveAsync(state);
+        var backup = await store.LoadBackupAsync();
+        Assert(backup!.Groups[0].Height >= minimum.Height, "backup shares expanded size validation");
+    }
+    var invalid = new GroupDefinition { Width = double.NaN, Height = double.PositiveInfinity };
+    LayoutSizeService.Normalize(invalid);
+    Assert(invalid.Width == GroupDefinition.DefaultWidth && invalid.Height == GroupDefinition.DefaultHeight,
+        "non-finite sizes recover to defaults");
+    var profiles = new DisplayLayoutProfileService();
+    profiles.SetDataDirectory(Path.Combine(root, "size-profiles"));
+    var group = new GroupDefinition { Width = 220, Height = 36, IsCollapsed = true, Tabs = [new(), new()] };
+    await profiles.SaveAsync("display-a", [group]);
+    Assert(group.Height == 36, "profile serialization does not mutate the live model");
+    var restoredProfile = await profiles.LoadAsync("display-a");
+    Assert(restoredProfile![0].Height >= LayoutSizeService.MinimumExpandedSize(group).Height && restoredProfile[0].IsCollapsed,
+        "display profiles keep valid expanded geometry and collapse state");
+    var profilePath = Path.Combine(root, "size-profiles", "display-layouts", "legacy.json");
+    await File.WriteAllTextAsync(profilePath, System.Text.Json.JsonSerializer.Serialize(new[] { group }));
+    Assert((await profiles.LoadAsync("legacy"))![0].Height > 60, "raw legacy display profiles are repaired on load");
+
+    // SaveAsync must capture state before waiting for I/O, not serialize a later UI mutation.
+    var stableStore = new LayoutStore(Path.Combine(root, "stable-size-save"));
+    var stable = new GroupDefinition { Width = 600, Height = 440 };
+    var pendingSave = stableStore.SaveAsync(new AppState { Groups = [stable] });
+    stable.Height = 36;
+    await pendingSave;
+    Assert((await stableStore.LoadAsync()).Groups[0].Height == 440, "save serializes a stable snapshot before yielding");
+}
+
+static async Task TestDisplayLayoutChangesAsync()
+{
+    var changes = new DisplayLayoutChangeService();
+    var signature = "a";
+    var active = true;
+    var saved = new List<(string Signature, double Height)>();
+    var loads = new List<string>();
+    var group = new GroupDefinition { Height = 440 };
+    var saveGate = new TaskCompletionSource();
+    var loadGate = new TaskCompletionSource();
+    var gateSave = false;
+    var gateLoad = false;
+    async Task Save(string key, IEnumerable<GroupDefinition> groups)
+    {
+        if (gateSave) await saveGate.Task;
+        saved.Add((key, groups.Single().Height));
+    }
+    async Task<List<GroupDefinition>?> Load(string key)
+    {
+        loads.Add(key);
+        if (gateLoad) await loadGate.Task;
+        return [new GroupDefinition { Title = key }];
+    }
+    Task<DisplayLayoutChangeResult?> Process(bool autoSwitch = true) => changes.ProcessAsync(
+        "a", [group], autoSwitch, () => signature, Save, Load, () => active);
+
+    changes.NotifyChanged();
+    changes.NotifyChanged();
+    var same = await Process();
+    Assert(same?.Signature == "a" && same.Profile is null && saved.Count == 0 && loads.Count == 0,
+        "same display signature does not save or recreate layouts");
+
+    signature = "b";
+    gateSave = true;
+    changes.NotifyChanged();
+    var first = Process();
+    Assert(changes.IsProcessing, "display switch remains busy while saving");
+    group.Height = 500;
+    signature = "c";
+    changes.NotifyChanged();
+    Assert(await Process() is null && saved.Count == 0, "overlapping display switch cannot start another transaction");
+    saveGate.SetResult();
+    Assert(await first is null && loads.Count == 0 && changes.HasPendingChange,
+        "notification during save rejects stale switch before profile load");
+    Assert(saved.Single() == ("a", 440), "old display gets immutable model dimensions under its own signature");
+    gateSave = false;
+    var latest = await Process();
+    Assert(latest?.Signature == "c" && latest.Profile![0].Title == "c" && !changes.HasPendingChange,
+        "latest display notification wins");
+
+    signature = "d";
+    gateLoad = true;
+    changes.NotifyChanged();
+    var loading = Process();
+    signature = "e";
+    changes.NotifyChanged();
+    loadGate.SetResult();
+    Assert(await loading is null && changes.HasPendingChange, "notification during load rejects stale profile");
+    gateLoad = false;
+    Assert((await Process())?.Signature == "e", "pending switch drains after stale load");
+
+    loadGate = new TaskCompletionSource();
+    gateLoad = true;
+    changes.NotifyChanged();
+    var exiting = Process();
+    active = false;
+    loadGate.SetResult();
+    Assert(await exiting is null && !changes.IsProcessing, "shutdown prevents asynchronous profile application");
+    active = true;
+    changes.NotifyChanged();
+    var noSwitch = await Process(autoSwitch: false);
+    Assert(noSwitch?.Signature == "e" && noSwitch.Profile is null,
+        "disabled automatic switching refreshes signature without loading a profile");
+
+    loadGate = new TaskCompletionSource();
+    changes.NotifyChanged();
+    var unannounced = Process();
+    signature = "f";
+    loadGate.SetResult();
+    Assert(await unannounced is null && changes.HasPendingChange,
+        "signature is rechecked even if the new display notification has not arrived");
+    var failed = false;
+    try
+    {
+        await changes.ProcessAsync("a", [group], true, () => signature, Save,
+            _ => throw new IOException("simulated profile failure"), () => true);
+    }
+    catch (IOException) { failed = true; }
+    Assert(failed && !changes.IsProcessing, "profile I/O failure releases display switch serialization");
 }
 
 static void Assert(bool condition, string name)
@@ -1383,8 +1525,9 @@ static void TestDesktopWindowStyle(string root)
     {
         try
         {
-            var app = new ZDesk.App();
-            app.InitializeComponent();
+            var app = new SmokeApplication();
+            app.ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
+            TestLayoutSizeWindows(root);
             var detectedDesktopHost = WorkerWHostService.FindHost();
             TestNativeMethods.GetWindowThreadProcessId(detectedDesktopHost, out var detectedHostProcessId);
             var detectedProcessName = detectedHostProcessId == 0
@@ -1812,6 +1955,122 @@ static void TestDesktopWindowStyle(string root)
     if (failure is not null) throw new InvalidOperationException("Desktop window style test failed.", failure);
 }
 
+static void TestLayoutSizeWindows(string root)
+{
+    var captureHost = (ZDesk.MainWindow)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(ZDesk.MainWindow));
+    var binding = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+    var windows = new List<DesktopGroupWindow>();
+    typeof(ZDesk.MainWindow).GetField("_desktopWindows", binding)!.SetValue(captureHost, windows);
+    typeof(ZDesk.MainWindow).GetField("_nativeDesktopControllers", binding)!.SetValue(captureHost,
+        new Dictionary<Guid, NativeDesktopWindowController>());
+    void Capture() => typeof(ZDesk.MainWindow).GetMethod("CaptureCurrentLayout", binding)!.Invoke(captureHost, null);
+    var folder = Directory.CreateDirectory(Path.Combine(root, "one-row-size")).FullName;
+    File.WriteAllText(Path.Combine(folder, "item.txt"), "one row");
+    foreach (var mode in Enum.GetValues<LayoutViewMode>())
+    foreach (var tabbed in new[] { false, true })
+    {
+        var definition = new GroupDefinition
+        {
+            Width = 220, Height = 36, ViewMode = mode, Kind = GroupKind.Folder, FolderPath = folder,
+            Tabs = tabbed ? [new LayoutTab(), new LayoutTab()] : []
+        };
+        var window = new DesktopGroupWindow(definition, animationsEnabled: false)
+        { Left = -12000, Top = -12000, Opacity = 0 };
+        windows.Add(window);
+        var expected = (definition.Width, definition.Height);
+        Capture();
+        Assert((definition.Width, definition.Height) == expected, "unshown HWND dimensions do not overwrite model geometry");
+        window.Show();
+        PumpDispatcher(TimeSpan.FromMilliseconds(80));
+        var list = (System.Windows.Controls.ListBox)window.Group.FindName("FileList");
+        var viewer = FindVisualChild<System.Windows.Controls.ScrollViewer>(list);
+        Assert(viewer is not null && viewer.ActualHeight >= window.Group.ViewItemHeight,
+            $"minimum {mode}/{tabbed} layout has at least one row of viewport");
+        var item = list.ItemContainerGenerator.ContainerFromIndex(0) as System.Windows.FrameworkElement;
+        Assert(item is not null, "minimum layout realizes its first item");
+        var itemOrigin = item!.TranslatePoint(new System.Windows.Point(), window.Group);
+        Assert(itemOrigin.Y + item.ActualHeight <= window.Group.ActualHeight - 1 &&
+            itemOrigin.X + item.ActualWidth <= window.Group.ActualWidth - 1,
+            $"minimum {mode}/{tabbed} layout fully contains the first item");
+        var button = (System.Windows.Controls.Button)window.Group.FindName("CollapseButton");
+        void Toggle() => button.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+        Toggle();
+        PumpDispatcher(TimeSpan.FromMilliseconds(20));
+        Capture();
+        Assert(definition.IsCollapsed && Math.Abs(window.ActualHeight - window.Group.CurrentHeaderHeight) < 1.5,
+            "expanded minimum height does not block explicit folding");
+        Assert((definition.Width, definition.Height) == expected, "collapsed window keeps expanded size when saving");
+        Toggle();
+        PumpDispatcher(TimeSpan.FromMilliseconds(20));
+        Assert(!definition.IsCollapsed && window.ActualHeight >= expected.Height - 1.5,
+            "damaged layout expands to usable content height");
+
+        window.HideAnimated();
+        window.EnsureVisibleOnCurrentDisplays();
+        Capture();
+        Assert((definition.Width, definition.Height) == expected, "hidden display refresh and save preserve expanded size");
+        window.ShowAnimated();
+        PumpDispatcher(TimeSpan.FromMilliseconds(20));
+        Assert(window.Group.ActualHeight >= expected.Height - 1.5,
+            "reattaching hidden content retains usable sizing");
+
+        var thumb = (System.Windows.Controls.Primitives.Thumb)window.Group.FindName("ResizeThumb");
+        thumb.RaiseEvent(new System.Windows.Controls.Primitives.DragStartedEventArgs(0, 0)
+            { RoutedEvent = System.Windows.Controls.Primitives.Thumb.DragStartedEvent });
+        thumb.RaiseEvent(new System.Windows.Controls.Primitives.DragDeltaEventArgs(-10_000, -10_000)
+            { RoutedEvent = System.Windows.Controls.Primitives.Thumb.DragDeltaEvent });
+        var minimum = LayoutSizeService.MinimumExpandedSize(definition);
+        Assert(definition.Width == minimum.Width && definition.Height == minimum.Height,
+            "resize grip enforces dynamic minimum geometry");
+        thumb.RaiseEvent(new System.Windows.Controls.Primitives.DragDeltaEventArgs(30, 60)
+            { RoutedEvent = System.Windows.Controls.Primitives.Thumb.DragDeltaEvent });
+        thumb.RaiseEvent(new System.Windows.Controls.Primitives.DragCompletedEventArgs(30, 60, false)
+            { RoutedEvent = System.Windows.Controls.Primitives.Thumb.DragCompletedEvent });
+        Assert(definition.Width == minimum.Width + 30 && definition.Height == minimum.Height + 60,
+            "immediate resize updates model without waiting for WPF layout");
+        Capture();
+        Assert(definition.Height == minimum.Height + 60, "save before render keeps the user's resized geometry");
+        windows.Remove(window);
+        window.Close();
+    }
+
+    var animated = new GroupDefinition { Width = 600, Height = 440 };
+    var animatedWindow = new DesktopGroupWindow(animated) { Left = -12000, Top = -12000, Opacity = 0 };
+    windows.Add(animatedWindow);
+    animatedWindow.Show();
+    PumpDispatcher(TimeSpan.FromMilliseconds(40));
+    var collapse = (System.Windows.Controls.Button)animatedWindow.Group.FindName("CollapseButton");
+    void Click() => collapse.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+    Click();
+    PumpDispatcher(TimeSpan.FromMilliseconds(40));
+    Capture();
+    Assert(animated.Height == 440, "save during fold animation preserves expanded height");
+    Click();
+    PumpDispatcher(TimeSpan.FromMilliseconds(40));
+    typeof(ZDesk.MainWindow).GetField("_layoutUpdateDepth", binding)!.SetValue(captureHost, 1);
+    animated.DesktopX = 123;
+    Capture();
+    Assert(animated.DesktopX == 123, "batch window reconstruction suppresses partial placement capture");
+    typeof(ZDesk.MainWindow).GetField("_layoutUpdateDepth", binding)!.SetValue(captureHost, 0);
+    animated.DesktopX = animatedWindow.Left;
+    animatedWindow.EnsureVisibleOnCurrentDisplays();
+    PumpDispatcher(TimeSpan.FromMilliseconds(260));
+    var content = (System.Windows.Controls.Grid)animatedWindow.Group.FindName("ContentPanel");
+    Assert(!animatedWindow.Group.IsSizeTransitionActive && !animated.IsCollapsed &&
+        Math.Abs(animatedWindow.ActualHeight - 440) < 1.5 && content.IsHitTestVisible && content.Opacity == 1,
+        "display refresh settles interrupted expansion and restores input");
+    animated.ViewMode = LayoutViewMode.ExtraLargeIcons;
+    animated.Height = 140;
+    animatedWindow.Group.RefreshDefinitionChrome();
+    Assert(animated.Height >= LayoutSizeService.MinimumExpandedSize(animated).Height,
+        "view changes recompute minimum dimensions");
+    animated.Tabs = [new LayoutTab(), new LayoutTab()];
+    animatedWindow.Group.RefreshDefinitionChrome();
+    Assert(animated.Height >= LayoutSizeService.MinimumExpandedSize(animated).Height,
+        "adding tabs recomputes minimum dimensions");
+    animatedWindow.Close();
+}
+
 static bool IsDarkSurface(System.Windows.Media.Brush brush) =>
     brush is System.Windows.Media.SolidColorBrush solid &&
     (solid.Color.R + solid.Color.G + solid.Color.B) / 3 < 100;
@@ -1860,6 +2119,14 @@ static T? FindVisualChild<T>(System.Windows.DependencyObject root) where T : Sys
         if (FindVisualChild<T>(child) is { } nested) return nested;
     }
     return null;
+}
+
+// Use the real resource loader without starting a controller, registering shell
+// entries, or signaling/exiting the user's already-running desktop instance.
+sealed class SmokeApplication : ZDesk.App
+{
+    protected override void OnStartup(System.Windows.StartupEventArgs e) { }
+    protected override void OnExit(System.Windows.ExitEventArgs e) { }
 }
 
 static class TestNativeMethods

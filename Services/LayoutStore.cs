@@ -66,16 +66,16 @@ public sealed class LayoutStore
 
     public async Task SaveAsync(AppState state)
     {
+        // Freeze the UI-thread model before yielding; profile switches and
+        // file notifications must not mutate an in-flight JSON serialization.
+        var json = JsonSerializer.Serialize(state, JsonOptions);
         await _saveGate.WaitAsync();
         try
         {
             Directory.CreateDirectory(StateDirectory);
             var tempFile = StateFile + ".tmp";
 
-            await using (var stream = File.Create(tempFile))
-            {
-                await JsonSerializer.SerializeAsync(stream, state, JsonOptions);
-            }
+            await File.WriteAllTextAsync(tempFile, json);
 
             if (File.Exists(StateFile))
             {
@@ -195,14 +195,13 @@ public sealed class LayoutStore
             }
             group.ActiveTabIndex = group.Tabs.Count == 0 ? 0 : Math.Clamp(group.ActiveTabIndex, 0, group.Tabs.Count - 1);
             group.Title = string.IsNullOrWhiteSpace(group.Title) ? "未命名分组" : group.Title.Trim();
-            group.Width = Math.Clamp(group.Width, 220, 1600);
-            group.Height = Math.Clamp(group.Height, 80, 1200);
             group.PinnedPaths ??= [];
             group.ItemOrder ??= [];
             if (!Enum.IsDefined(group.DockEdge)) group.DockEdge = DockEdge.None;
             if (!Enum.IsDefined(group.ViewMode)) group.ViewMode = LayoutViewMode.MediumIcons;
             if (!Enum.IsDefined(group.SortProperty)) group.SortProperty = LayoutSortProperty.Manual;
             LayoutItemStateService.Normalize(group);
+            LayoutSizeService.Normalize(group);
         }
 
         foreach (var rule in state.Rules)

@@ -68,6 +68,7 @@ public sealed class DesktopGroupWindow : Window
         double iconSize = 88,
         double animationSpeed = 1.0)
     {
+        LayoutSizeService.Normalize(definition);
         // A shaped top-level window avoids the expensive WPF layered-window
         // composition path while preserving the existing WPF content tree.
         _nativePresentation = true;
@@ -81,10 +82,11 @@ public sealed class DesktopGroupWindow : Window
         SizeToContent = SizeToContent.Manual;
         UseLayoutRounding = true;
         SnapsToDevicePixels = true;
-        MinWidth = 220;
-        MinHeight = 36;
+        var minimum = LayoutSizeService.MinimumExpandedSize(definition);
+        MinWidth = minimum.Width;
+        MinHeight = definition.IsCollapsed ? LayoutSizeService.HeaderHeight(definition) : minimum.Height;
         Width = definition.Width;
-        Height = definition.IsCollapsed ? (definition.HasMultipleTabs ? 60 : 36) : definition.Height;
+        Height = definition.IsCollapsed ? LayoutSizeService.HeaderHeight(definition) : definition.Height;
 
         Group = new GroupContainer(
             definition,
@@ -100,6 +102,8 @@ public sealed class DesktopGroupWindow : Window
         Group.ExitRequested += (_, _) => ExitRequested?.Invoke(this, EventArgs.Empty);
         Group.UserInteraction += (_, _) => UserInteraction?.Invoke(this, EventArgs.Empty);
         Content = Group;
+        Group.DesktopHost = this;
+        Group.CompleteSizeTransition();
 
         var placement = GetSafePlacement(definition);
         Left = placement.X;
@@ -541,6 +545,7 @@ public sealed class DesktopGroupWindow : Window
 
     public void EnsureVisibleOnCurrentDisplays()
     {
+        Group.CompleteSizeTransition();
         var placement = GetSafePlacement(Group.Definition);
         if (Math.Abs(Left - placement.X) > 0.5 || Math.Abs(Top - placement.Y) > 0.5)
         {
@@ -548,10 +553,10 @@ public sealed class DesktopGroupWindow : Window
             Top = placement.Y;
         }
 
-        var virtualWidth = SystemParameters.VirtualScreenWidth;
-        var virtualHeight = SystemParameters.VirtualScreenHeight;
-        Width = Math.Min(Math.Max(MinWidth, Width), Math.Max(MinWidth, virtualWidth));
-        Height = Math.Min(Math.Max(MinHeight, Height), Math.Max(MinHeight, virtualHeight));
+        // Display changes can resize the HWND transiently. Reapply the user's
+        // expanded size instead of treating those transient bounds as intent.
+        Width = Group.Definition.Width;
+        Height = Group.Definition.IsCollapsed ? Group.CurrentHeaderHeight : Group.Definition.Height;
     }
 
     public void RefreshContents() => Group.RefreshItems();

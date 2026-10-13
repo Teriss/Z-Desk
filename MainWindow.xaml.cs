@@ -23,6 +23,10 @@ public partial class MainWindow : Window
     private QrRecognitionFrameController? _qrFrameController;
     private MemoWindowController? _memoController;
     private readonly DispatcherTimer _saveTimer;
+    private readonly DispatcherTimer _displayChangeTimer;
+    private readonly DisplayLayoutChangeService _displayChanges = new();
+    private int _layoutUpdateDepth;
+    private bool _layoutCapturePending;
     private readonly DesktopDoubleClickService _desktopDoubleClickService;
     private readonly TrayIconService _trayIconService;
     private readonly StartupService _startupService = new();
@@ -76,6 +80,8 @@ public partial class MainWindow : Window
 
         _saveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
         _saveTimer.Tick += SaveTimer_Tick;
+        _displayChangeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _displayChangeTimer.Tick += DisplayChangeTimer_Tick;
         _desktopDoubleClickService = new DesktopDoubleClickService(Dispatcher);
         _desktopDoubleClickService.DesktopBlankDoubleClicked += (_, _) =>
         {
@@ -375,21 +381,34 @@ public partial class MainWindow : Window
 
     private void SystemEvents_DisplaySettingsChanged(object? sender, EventArgs e)
     {
-        _ = Dispatcher.BeginInvoke(async () =>
+        _ = Dispatcher.BeginInvoke(() =>
         {
             if (_shutdownInProgress || !_isLoaded) return;
-            CaptureCurrentLayout();
-            if (_state.Settings.AutoSwitchDisplayLayouts)
+            _displayChanges.NotifyChanged();
+            _displayChangeTimer.Stop();
+            _displayChangeTimer.Start();
+        }, DispatcherPriority.Background);
+    }
+
+    private async void DisplayChangeTimer_Tick(object? sender, EventArgs e)
+    {
+        _displayChangeTimer.Stop();
+        if (_shutdownInProgress || !_isLoaded) return;
+        try
+        {
+            var autoSwitch = _state.Settings.AutoSwitchDisplayLayouts;
+            var groups = _state.Groups;
+            var result = await _displayChanges.ProcessAsync(
+                _displaySignature, _state.Groups, autoSwitch,
+                _displayProfiles.GetCurrentSignature, _displayProfiles.SaveAsync, _displayProfiles.LoadAsync,
+                () => !_shutdownInProgress && _isLoaded && _state.Settings.AutoSwitchDisplayLayouts == autoSwitch &&
+                    ReferenceEquals(_state.Groups, groups));
+            if (result is null) return;
+            _displaySignature = result.Signature;
+            if (result.Profile is not null)
             {
-                await _displayProfiles.SaveAsync(_displaySignature, _state.Groups);
-                var newSignature = _displayProfiles.GetCurrentSignature();
-                var profile = await _displayProfiles.LoadAsync(newSignature);
-                _displaySignature = newSignature;
-                if (profile is not null)
-                {
-                    _state.Groups = profile;
-                    RecreateDesktopGroups();
-                }
+                _state.Groups = result.Profile;
+                RecreateDesktopGroups();
             }
             foreach (var window in _desktopWindows)
             {
@@ -402,7 +421,16 @@ public partial class MainWindow : Window
 
             StatusText.Text = "显示器配置已变化，桌面分组位置已重新校验";
             ScheduleSave();
-        }, DispatcherPriority.Background);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
+        {
+            LogService.Warning("Display layout transition failed; retained current layouts", ex);
+        }
+        finally
+        {
+            if (_displayChanges.HasPendingChange && !_shutdownInProgress && _isLoaded)
+                _displayChangeTimer.Start();
+        }
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -522,12 +550,17 @@ public partial class MainWindow : Window
 
     private void RecreateDesktopGroups()
     {
-        foreach (var existing in _desktopWindows.ToArray()) existing.Close();
-        foreach (var native in _nativeDesktopControllers.Values) native.Dispose();
-        _nativeDesktopControllers.Clear();
-        _desktopWindows.Clear();
-        foreach (var definition in _state.Groups) AddDesktopGroupWindow(definition);
-        _desktopSurface?.RefreshItems();
+        ++_layoutUpdateDepth;
+        try
+        {
+            foreach (var existing in _desktopWindows.ToArray()) existing.Close();
+            foreach (var native in _nativeDesktopControllers.Values) native.Dispose();
+            _nativeDesktopControllers.Clear();
+            _desktopWindows.Clear();
+            foreach (var definition in _state.Groups) AddDesktopGroupWindow(definition);
+            _desktopSurface?.RefreshItems();
+        }
+        finally { EndLayoutUpdate(); }
     }
 
     /// <summary>
@@ -663,68 +696,82 @@ public partial class MainWindow : Window
 
     private DesktopGroupWindow AddDesktopGroupWindow(GroupDefinition definition, bool animate = true)
     {
-        var window = new DesktopGroupWindow(
-            definition,
-            _state.Settings.EnableAnimations,
-            _state.Settings.ContainerOpacity,
-            _state.Settings.ContainerCornerRadius,
-            _state.Settings.IconSize,
-            _state.Settings.AnimationSpeed)
+        ++_layoutUpdateDepth;
+        try
         {
-            Owner = _desktopSurface
-        };
-        window.LayoutChanged += (_, _) =>
+            var window = new DesktopGroupWindow(
+                definition,
+                _state.Settings.EnableAnimations,
+                _state.Settings.ContainerOpacity,
+                _state.Settings.ContainerCornerRadius,
+                _state.Settings.IconSize,
+                _state.Settings.AnimationSpeed)
+            {
+                Owner = _desktopSurface
+            };
+            window.LayoutChanged += (_, _) =>
+            {
+                _desktopSurface?.RefreshItems();
+                ScheduleSave();
+            };
+            window.RemoveRequested += DesktopGroup_RemoveRequested;
+            window.SettingsRequested += (_, _) => SettingsButton_Click(window, new RoutedEventArgs());
+            window.ExitRequested += (_, _) => RequestApplicationExit();
+            window.Group.CreateLayoutRequested += kind => CreateLayoutFromDesktopMenu(
+                kind == GroupKind.Folder ? "folder" : "empty", window);
+            window.InteractionRequested += (_, _) => BringLayoutToFront(window);
+            window.UserInteraction += (_, _) => ScheduleIdleMemorySnapshot("user-idle");
+            window.Group.StatusChanged += (_, message) => StatusText.Text = message;
+            window.Group.HeaderDragCompleted += screenPoint => HandleHeaderDragCompleted(window, screenPoint);
+            window.Group.TabDragStarted += (payload, screenPoint) => BeginDetachedTabDrag(window, payload, screenPoint);
+            _desktopWindows.Add(window);
+            NativeDesktopWindowController? controller = null;
+            if (DesktopRenderingOptions.UseNativeTopLevel)
+            {
+                controller = new NativeDesktopWindowController(window.Group, new NativeDesktopBounds(
+                    (int)Math.Round(window.Left),
+                    (int)Math.Round(window.Top),
+                    Math.Max(220, (int)Math.Round(definition.Width)),
+                    Math.Max(36, (int)Math.Round(definition.IsCollapsed ? window.Group.CurrentHeaderHeight : definition.Height))),
+                    (int)Math.Round(_state.Settings.ContainerCornerRadius));
+                controller.LayoutChanged += (_, _) => ScheduleSave();
+                _nativeDesktopControllers[definition.Id] = controller;
+                controller.Show();
+                // The native controller owns presentation now. Detach the WPF
+                // visual tree so its templates, item containers, and compositor
+                // resources are eligible for collection while the model remains
+                // alive for Shell/watchers and native snapshot updates.
+                window.DetachVisualTreeForNativePresentation();
+            }
+            else if (!_groupsHidden || _isTopmost)
+            {
+                if (animate) window.ShowAnimated();
+                else window.Show();
+            }
+            if (DesktopRenderingOptions.UseNativeTopLevel)
+            {
+                controller!.Window.DockEdge = definition.DockEdge;
+                if (IsTopmostRequested(window)) controller.Window.SetTemporaryTopmost(true);
+                else controller.Window.RestoreDesktopLayer();
+            }
+            else
+            {
+                window.SetInteractionMode(_state.Settings.InteractionMode);
+                if (IsTopmostRequested(window)) window.SetTemporaryTopmost(true);
+                else window.RestoreDesktopLayer();
+            }
+            return window;
+        }
+        finally { EndLayoutUpdate(); }
+    }
+
+    private void EndLayoutUpdate()
+    {
+        if (--_layoutUpdateDepth == 0 && _layoutCapturePending)
         {
-            _desktopSurface?.RefreshItems();
+            _layoutCapturePending = false;
             ScheduleSave();
-        };
-        window.RemoveRequested += DesktopGroup_RemoveRequested;
-        window.SettingsRequested += (_, _) => SettingsButton_Click(window, new RoutedEventArgs());
-        window.ExitRequested += (_, _) => RequestApplicationExit();
-        window.Group.CreateLayoutRequested += kind => CreateLayoutFromDesktopMenu(
-            kind == GroupKind.Folder ? "folder" : "empty", window);
-        window.InteractionRequested += (_, _) => BringLayoutToFront(window);
-        window.UserInteraction += (_, _) => ScheduleIdleMemorySnapshot("user-idle");
-        window.Group.StatusChanged += (_, message) => StatusText.Text = message;
-        window.Group.HeaderDragCompleted += screenPoint => HandleHeaderDragCompleted(window, screenPoint);
-        window.Group.TabDragStarted += (payload, screenPoint) => BeginDetachedTabDrag(window, payload, screenPoint);
-        _desktopWindows.Add(window);
-        NativeDesktopWindowController? controller = null;
-        if (DesktopRenderingOptions.UseNativeTopLevel)
-        {
-            controller = new NativeDesktopWindowController(window.Group, new NativeDesktopBounds(
-                (int)Math.Round(window.Left),
-                (int)Math.Round(window.Top),
-                Math.Max(220, (int)Math.Round(definition.Width)),
-                Math.Max(36, (int)Math.Round(definition.IsCollapsed ? window.Group.CurrentHeaderHeight : definition.Height))),
-                (int)Math.Round(_state.Settings.ContainerCornerRadius));
-            controller.LayoutChanged += (_, _) => ScheduleSave();
-            _nativeDesktopControllers[definition.Id] = controller;
-            controller.Show();
-            // The native controller owns presentation now. Detach the WPF
-            // visual tree so its templates, item containers, and compositor
-            // resources are eligible for collection while the model remains
-            // alive for Shell/watchers and native snapshot updates.
-            window.DetachVisualTreeForNativePresentation();
         }
-        else if (!_groupsHidden || _isTopmost)
-        {
-            if (animate) window.ShowAnimated();
-            else window.Show();
-        }
-        if (DesktopRenderingOptions.UseNativeTopLevel)
-        {
-            controller!.Window.DockEdge = definition.DockEdge;
-            if (IsTopmostRequested(window)) controller.Window.SetTemporaryTopmost(true);
-            else controller.Window.RestoreDesktopLayer();
-        }
-        else
-        {
-            window.SetInteractionMode(_state.Settings.InteractionMode);
-            if (IsTopmostRequested(window)) window.SetTemporaryTopmost(true);
-            else window.RestoreDesktopLayer();
-        }
-        return window;
     }
 
     private void ScheduleIdleMemorySnapshot(string phase)
@@ -808,8 +855,8 @@ public partial class MainWindow : Window
     {
         var detached = GroupDefinition.FromTab(payload.Tab);
         detached.AutoCollapse = payload.AutoCollapse;
-        detached.Width = originalHost.ActualWidth;
-        detached.Height = originalHost.ActualHeight;
+        detached.Width = originalHost.Group.Definition.Width;
+        detached.Height = originalHost.Group.Definition.Height;
         detached.DesktopX = screenPoint.X - detached.Width / 2;
         detached.DesktopY = screenPoint.Y - 24;
         _state.Groups.Add(detached);
@@ -1401,10 +1448,6 @@ public partial class MainWindow : Window
         SynchronizeDesktopGroups(groups);
         _state.Rules = rules;
         _state.LayoutMatchRules = layoutRules;
-        if (_state.Settings.AutoSwitchDisplayLayouts)
-        {
-            await _displayProfiles.SaveAsync(_displaySignature, _state.Groups);
-        }
         ConfigureRuleTimer();
         ApplySettingsToCurrentGroups();
         ApplyActiveTopmostState();
@@ -1771,6 +1814,11 @@ public partial class MainWindow : Window
 
     private void ScheduleSave()
     {
+        if (_layoutUpdateDepth > 0)
+        {
+            _layoutCapturePending = true;
+            return;
+        }
         if (!_isLoaded)
         {
             return;
@@ -1809,15 +1857,20 @@ public partial class MainWindow : Window
     {
         CaptureCurrentLayout();
         SynchronizeOpenSettingsLayouts();
+        var signature = _displaySignature;
+        var groups = SnapshotService.CloneGroups(_state.Groups);
         await _layoutStore.SaveAsync(_state);
-        if (_state.Settings.AutoSwitchDisplayLayouts)
-            await _displayProfiles.SaveAsync(_displaySignature, _state.Groups);
+        if (_state.Settings.AutoSwitchDisplayLayouts && signature == _displaySignature &&
+            signature == _displayProfiles.GetCurrentSignature() &&
+            !_displayChanges.IsProcessing && !_displayChanges.HasPendingChange)
+            await _displayProfiles.SaveAsync(signature, groups);
     }
 
     private void SynchronizeOpenSettingsLayouts() => _settingsWindow?.SynchronizeLayouts(_state.Groups);
 
     private void CaptureCurrentLayout()
     {
+        if (_layoutUpdateDepth > 0) return;
         foreach (var window in _desktopWindows)
         {
             var definition = window.Group.Definition;
@@ -1833,16 +1886,14 @@ public partial class MainWindow : Window
             // desktop. Their persisted desktop position must remain the last
             // expanded position, otherwise an unrelated layout move makes them
             // impossible to reveal or restore to standard mode.
-            if (!window.IsEdgeHidden)
+            if (!window.IsEdgeHidden && window.IsLoaded && window.IsVisible)
             {
                 definition.DesktopX = window.Left;
                 definition.DesktopY = window.Top;
             }
-            definition.Width = window.ActualWidth;
-            if (!definition.IsCollapsed && !window.Group.IsSizeTransitionActive)
-            {
-                definition.Height = window.ActualHeight;
-            }
+            // Width/Height are expanded user geometry, updated explicitly by
+            // the resize grip. HWND/layout samples can be zero or transitional.
+            LayoutSizeService.Normalize(definition);
         }
     }
 
@@ -1876,6 +1927,7 @@ public partial class MainWindow : Window
 
         _shutdownInProgress = true;
         _isLoaded = false;
+        _displayChangeTimer.Stop();
         _idleMemorySnapshotCancellation?.Cancel();
         _saveTimer.Stop();
         try

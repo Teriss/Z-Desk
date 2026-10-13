@@ -19,6 +19,7 @@ AppState
 ```
 
 - `GroupDefinition` 保存宿主位置、尺寸、折叠、锁定和布局级设置。
+- 布局宽高始终保存展开尺寸，由缩放手柄显式更新；保存不读取窗口初始化、隐藏或动画期间的实时尺寸。`LayoutSizeService` 为配置加载、导入、备份、显示器配置和 WPF 控件统一计算最小尺寸，展开区域至少容纳当前视图完整一行，折叠高度仍只保留标题栏。
 - `LayoutTab` 保存页签 ID、类型、文件路径顺序、视图和排序状态。
 - 多页签宿主不是额外布局；每个页签仍是独立布局实体。
 - `LayoutMatchRule.GroupId` 指向普通布局或普通页签。
@@ -76,6 +77,7 @@ Shell 操作完成和 `FileSystemWatcher` 通知都按路径增删或替换 `Fil
 - `LayoutStore`：`layout.json`、备份、版本校验和损坏恢复。
 - `SnapshotService`：布局快照。
 - `DisplayLayoutProfileService`：显示器组合配置。
+- 显示器变化在 UI Dispatcher 上延迟 500 毫秒合并，由 `DisplayLayoutChangeService` 串行保存旧配置和读取新配置；相同签名不重新载入，异步期间出现新通知、布局集合变化或退出时不应用过期结果。批量重建窗口期间暂停捕获；主配置和显示器配置写入前固定模型快照，显示器配置通过临时文件替换写入。
 - `RuleHistoryService`：规则执行历史。
 - `RecoveryService`：会话异常标记。
 - `LogService`：按日期日志与保留策略。

@@ -15,8 +15,6 @@ namespace ZDesk.Controls;
 
 public partial class GroupContainer : System.Windows.Controls.UserControl, IDisposable
 {
-    private const double SingleHeaderHeight = 36;
-    private const double TabbedHeaderHeight = 60;
     private const string InternalDragFormat = "ZDesk.InternalLayoutItems";
     private sealed record InternalDragPayload(Guid GroupId, string[] Paths);
     public static readonly DependencyProperty IconTileWidthProperty = DependencyProperty.Register(
@@ -83,6 +81,10 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private NativeDesktopWindow? _nativeDesktopWindow;
 
     public GroupDefinition Definition { get; }
+    // Retain the size owner while a hidden window has detached its visual tree.
+    internal DesktopGroupWindow? DesktopHost { get; set; }
+    private FrameworkElement SizeTarget => (FrameworkElement?)DesktopHost ??
+        (Window.GetWindow(this) is DesktopGroupWindow host ? (FrameworkElement)host : this);
 
     public event EventHandler? LayoutChanged;
     public event EventHandler? RemoveRequested;
@@ -112,7 +114,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     public double ViewItemWidth { get => (double)GetValue(ViewItemWidthProperty); set => SetValue(ViewItemWidthProperty, value); }
     public double ViewItemHeight { get => (double)GetValue(ViewItemHeightProperty); set => SetValue(ViewItemHeightProperty, value); }
     public double ViewIconSize { get => (double)GetValue(ViewIconSizeProperty); set => SetValue(ViewIconSizeProperty, value); }
-    public double CurrentHeaderHeight => Definition.HasMultipleTabs ? TabbedHeaderHeight : SingleHeaderHeight;
+    public double CurrentHeaderHeight => LayoutSizeService.HeaderHeight(Definition);
     public bool IsSizeTransitionActive => _isSizeTransitionActive;
     public int FileEntryCount => _files.Count;
     private bool IsTopLevelNativePresentation => DesktopRenderingOptions.UseNativeTopLevel;
@@ -244,7 +246,11 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         if (!IsTopLevelNativePresentation) ApplyDefinition();
         LoadFolder();
         UpdateNativePresentation();
-        if (!IsTopLevelNativePresentation) Loaded += (_, _) => ScheduleAutoCollapse();
+        if (!IsTopLevelNativePresentation) Loaded += (_, _) =>
+        {
+            ApplySizeConstraints();
+            ScheduleAutoCollapse();
+        };
     }
 
     public void ApplyAppearance(bool animationsEnabled, double containerOpacity, double cornerRadius, double iconSize, double animationSpeed)
@@ -512,6 +518,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             UpdateNativePresentation();
             return;
         }
+        StopSizeAnimation(settle: true);
         if (_desktopHosted)
         {
             Width = double.NaN;
@@ -526,8 +533,6 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         }
 
         HeaderRow.Height = new GridLength(CurrentHeaderHeight);
-        if (_desktopHosted && Definition.IsCollapsed && Window.GetWindow(this) is DesktopGroupWindow hostWindow)
-            hostWindow.Height = CurrentHeaderHeight;
         TitleText.Text = Definition.Title;
         PathText.Text = Definition.Kind == GroupKind.Folder ? Definition.FolderPath : "普通布局";
         RenderTabs();
@@ -535,6 +540,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         OpenButton.Visibility = Definition.Kind == GroupKind.Folder ? Visibility.Visible : Visibility.Collapsed;
         ContentPanel.Visibility = Definition.IsCollapsed ? Visibility.Collapsed : Visibility.Visible;
         ContentPanel.Opacity = Definition.IsCollapsed ? 0 : 1;
+        ContentPanel.IsHitTestVisible = !Definition.IsCollapsed;
         ContentRow.Height = Definition.IsCollapsed ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
         UpdateHeaderGlyphs();
         ResizeThumb.Visibility = Definition.IsCollapsed ? Visibility.Collapsed : Visibility.Visible;
@@ -574,19 +580,17 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private void ApplyViewMode()
     {
         if (IsTopLevelNativePresentation) return;
-        var (templateKey, panelKey, itemWidth, itemHeight, iconSize) = Definition.ViewMode switch
+        var (templateKey, panelKey) = Definition.ViewMode switch
         {
-            LayoutViewMode.ExtraLargeIcons => ("IconFileTemplate", "WrapFileItemsPanel", 132d, 116d, 64d),
-            LayoutViewMode.LargeIcons => ("IconFileTemplate", "WrapFileItemsPanel", 112d, 96d, 48d),
-            LayoutViewMode.MediumIcons => ("IconFileTemplate", "WrapFileItemsPanel", IconTileWidth, 76d, 34d),
-            LayoutViewMode.SmallIcons => ("CompactFileTemplate", "WrapFileItemsPanel", 156d, 32d, 18d),
-            LayoutViewMode.List => ("CompactFileTemplate", "StackFileItemsPanel", double.NaN, 32d, 18d),
-            LayoutViewMode.Details => ("DetailsFileTemplate", "StackFileItemsPanel", double.NaN, 30d, 18d),
-            LayoutViewMode.Tiles => ("TileFileTemplate", "WrapFileItemsPanel", 220d, 64d, 38d),
-            LayoutViewMode.Content => ("ContentFileTemplate", "StackFileItemsPanel", double.NaN, 58d, 32d),
-            _ => ("IconFileTemplate", "WrapFileItemsPanel", IconTileWidth, 76d, 34d)
+            LayoutViewMode.SmallIcons => ("CompactFileTemplate", "WrapFileItemsPanel"),
+            LayoutViewMode.List => ("CompactFileTemplate", "StackFileItemsPanel"),
+            LayoutViewMode.Details => ("DetailsFileTemplate", "StackFileItemsPanel"),
+            LayoutViewMode.Tiles => ("TileFileTemplate", "WrapFileItemsPanel"),
+            LayoutViewMode.Content => ("ContentFileTemplate", "StackFileItemsPanel"),
+            _ => ("IconFileTemplate", "WrapFileItemsPanel")
         };
-
+        var (itemWidth, itemHeight, iconSize) = LayoutSizeService.ItemSize(Definition.ViewMode, IconTileWidth);
+        if (panelKey == "StackFileItemsPanel") itemWidth = double.NaN;
         ViewItemWidth = itemWidth;
         ViewItemHeight = itemHeight;
         ViewIconSize = iconSize;
@@ -596,7 +600,27 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             ? Visibility.Visible
             : Visibility.Collapsed;
         UpdateSortHeaders();
+        ApplySizeConstraints();
     }
+
+    private void ApplySizeConstraints()
+    {
+        LayoutSizeService.Normalize(Definition);
+        var minimum = LayoutSizeService.MinimumExpandedSize(Definition);
+        var target = SizeTarget;
+        MinWidth = minimum.Width;
+        MinHeight = Definition.IsCollapsed || _isSizeTransitionActive ? CurrentHeaderHeight : minimum.Height;
+        target.MinWidth = MinWidth;
+        target.MinHeight = MinHeight;
+        if (target != this || !_desktopHosted)
+        {
+            target.Width = Definition.Width;
+            if (!_isSizeTransitionActive)
+                target.Height = Definition.IsCollapsed ? CurrentHeaderHeight : Definition.Height;
+        }
+    }
+
+    public void CompleteSizeTransition() => StopSizeAnimation(settle: true);
 
     private void FileItem_Loaded(object sender, RoutedEventArgs e)
     {
@@ -1337,38 +1361,36 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
 
     private void ResizeGrip_DragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e)
     {
-        StopSizeAnimation();
+        StopSizeAnimation(settle: true);
     }
 
     private void ResizeGrip_DragDelta(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
     {
         if (Window.GetWindow(this) is DesktopGroupWindow desktopWindow)
         {
-            desktopWindow.Width = Math.Round(Math.Max(MinWidth, desktopWindow.ActualWidth + e.HorizontalChange));
+            Definition.Width = Math.Round(Math.Max(MinWidth, Definition.Width + e.HorizontalChange));
+            desktopWindow.Width = Definition.Width;
             if (!Definition.IsCollapsed)
             {
-                desktopWindow.Height = Math.Round(Math.Max(140, desktopWindow.ActualHeight + e.VerticalChange));
+                Definition.Height = Math.Round(Math.Max(LayoutSizeService.MinimumExpandedSize(Definition).Height,
+                    Definition.Height + e.VerticalChange));
+                desktopWindow.Height = Definition.Height;
             }
 
             return;
         }
 
-        Width = Math.Round(Math.Max(MinWidth, ActualWidth + e.HorizontalChange));
+        Definition.Width = Width = Math.Round(Math.Max(MinWidth, Definition.Width + e.HorizontalChange));
         if (!Definition.IsCollapsed)
         {
-            Height = Math.Round(Math.Max(140, ActualHeight + e.VerticalChange));
+            Definition.Height = Height = Math.Round(Math.Max(LayoutSizeService.MinimumExpandedSize(Definition).Height,
+                Definition.Height + e.VerticalChange));
         }
     }
 
     private void ResizeGrip_DragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e)
     {
-        var desktopWindow = Window.GetWindow(this) as DesktopGroupWindow;
-        Definition.Width = Math.Round(desktopWindow?.ActualWidth ?? ActualWidth);
-        if (!Definition.IsCollapsed)
-        {
-            Definition.Height = Math.Round(desktopWindow?.ActualHeight ?? ActualHeight);
-        }
-
+        ApplySizeConstraints();
         LayoutChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -1381,9 +1403,7 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
     private void SetCollapsed(bool collapse, bool notifyLayoutChanged = true)
     {
         if (Definition.IsCollapsed == collapse) return;
-        var resizeTarget = Window.GetWindow(this) is DesktopGroupWindow desktopWindow
-            ? (FrameworkElement)desktopWindow
-            : this;
+        var resizeTarget = SizeTarget;
 
         StopSizeAnimation();
         var animationVersion = ++_sizeAnimationVersion;
@@ -1396,12 +1416,14 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
         }
 
         Definition.IsCollapsed = collapse;
+        _isSizeTransitionActive = AnimationsEnabled;
+        ApplySizeConstraints();
         UpdateHeaderGlyphs();
 
         if (!AnimationsEnabled)
         {
             _isSizeTransitionActive = false;
-            resizeTarget.Height = collapse ? CurrentHeaderHeight : Definition.Height;
+            ApplySizeConstraints();
             ContentPanel.Opacity = collapse ? 0 : 1;
             ContentPanel.Visibility = collapse ? Visibility.Collapsed : Visibility.Visible;
             ContentPanel.IsHitTestVisible = !collapse;
@@ -1427,7 +1449,9 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             if (animationVersion != _sizeAnimationVersion) return;
             _isSizeTransitionActive = false;
             resizeTarget.BeginAnimation(HeightProperty, null);
-            resizeTarget.Height = targetHeight;
+            ApplySizeConstraints();
+            ContentPanel.BeginAnimation(OpacityProperty, null);
+            ContentPanel.Opacity = collapse ? 0 : 1;
             ContentPanel.IsHitTestVisible = !collapse;
             if (collapse)
             {
@@ -1578,19 +1602,26 @@ public partial class GroupContainer : System.Windows.Controls.UserControl, IDisp
             HandoffBehavior.SnapshotAndReplace);
     }
 
-    private void StopSizeAnimation()
+    private void StopSizeAnimation(bool settle = false)
     {
         ++_sizeAnimationVersion;
         _isSizeTransitionActive = false;
-        var resizeTarget = Window.GetWindow(this) is DesktopGroupWindow desktopWindow
-            ? (FrameworkElement)desktopWindow
-            : this;
+        var resizeTarget = SizeTarget;
         var currentHeight = resizeTarget.ActualHeight;
         var currentOpacity = ContentPanel.Opacity;
         resizeTarget.BeginAnimation(HeightProperty, null);
         resizeTarget.Height = currentHeight;
         ContentPanel.BeginAnimation(OpacityProperty, null);
         ContentPanel.Opacity = currentOpacity;
+        if (settle)
+        {
+            ApplySizeConstraints();
+            ContentPanel.Opacity = Definition.IsCollapsed ? 0 : 1;
+            ContentPanel.Visibility = Definition.IsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            ContentPanel.IsHitTestVisible = !Definition.IsCollapsed;
+            ContentRow.Height = Definition.IsCollapsed ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
+            ResizeThumb.Visibility = Definition.IsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+        }
     }
 
     private TimeSpan ScaledDuration(double milliseconds) => TimeSpan.FromMilliseconds(milliseconds / AnimationSpeed);
